@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: wrag_postgres
+    environment:
+      POSTGRES_DB: sag_lite
+      POSTGRES_USER: sag_lite
+      POSTGRES_PASSWORD: sag_lite_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - wrag_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sag_lite -d sag_lite"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  wrag:
+    build: .
+    container_name: wrag_app
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgres://sag_lite:sag_lite_pass@postgres:5432/sag_lite
+      # - WRAG_MAX_UPLOAD_SIZE_MB=100   # Optional: uncomment to enable file size limit
+    volumes:
+      - ./md_storage:/app/md_storage   # Markdown file persistence volume
+
+volumes:
+  wrag_pgdata:
