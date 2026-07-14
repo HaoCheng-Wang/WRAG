@@ -1,0 +1,7 @@
+{
+  "name": "wrag",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WRAG — Multi-Format RAG Knowledge Base (MCP HTTP Bridge dependency)"
+}

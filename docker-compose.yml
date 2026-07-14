@@ -7,6 +7,7 @@ services:
       POSTGRES_USER: sag_lite
       POSTGRES_PASSWORD: sag_lite_pass
     ports:
+      # 可关闭此端口映射，仅容器内通信更安全
       - "5432:5432"
     volumes:
       - wrag_pgdata:/var/lib/postgresql/data
@@ -20,15 +21,31 @@ services:
     build: .
     container_name: wrag_app
     ports:
-      - "8000:8000"
+      # 前端 UI + REST API（供用户和 AI 代理调用）
+      - "8555:8555"
+      # MCP 协议端口（供 Claude Desktop、Cursor 等 AI 客户端直连）
+      - "4174:4174"
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgres://sag_lite:sag_lite_pass@postgres:5432/sag_lite
-      # - WRAG_MAX_UPLOAD_SIZE_MB=100   # Optional: uncomment to enable file size limit
+      # === PostgreSQL（容器内服务名是 postgres，不是 localhost）===
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      DATABASE_URL: postgres://sag_lite:sag_lite_pass@postgres:5432/sag_lite
+      # === WRAG 配置 ===
+      WRAG_HOST: 0.0.0.0
+      WRAG_PORT: 8555
+      SAG_API_URL: http://127.0.0.1:4173
+      # === 可选：文件上传大小限制（MB），取消注释启用 ===
+      # WRAG_MAX_UPLOAD_SIZE_MB: 100
+      # === 可选：MCP 协议桥接，填入项目 UUID 启用 ===
+      # 在前端创建项目后，从 URL 复制 projectId 填入此处
+      # WRAG_MCP_SOURCE_ID: your-project-uuid-here
     volumes:
-      - ./md_storage:/app/md_storage   # Markdown file persistence volume
+      # Markdown 文件持久化
+      - wrag_md_storage:/app/md_storage
 
 volumes:
   wrag_pgdata:
+  wrag_md_storage:

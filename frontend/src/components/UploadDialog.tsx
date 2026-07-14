@@ -1,6 +1,6 @@
 /** File upload dialog — drag-and-drop with format info and SSE progress. */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Modal, Upload, Switch, Tag, Progress, message, Typography, Space } from "antd";
 import { InboxOutlined } from "@ant-design/icons";
 import type { UploadFile } from "antd";
@@ -29,6 +29,7 @@ export default function UploadDialog({ open, projectId, onClose, onSuccess, t }:
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<any>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -38,6 +39,7 @@ export default function UploadDialog({ open, projectId, onClose, onSuccess, t }:
       setProgress(0);
       setError(null);
       setResult(null);
+      abortRef.current = null;
     }
   }, [open]);
 
@@ -57,9 +59,15 @@ export default function UploadDialog({ open, projectId, onClose, onSuccess, t }:
     if (fileList.length === 0) return;
     setUploading(true);
     setError(null);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const file = fileList[0].originFileObj!;
       const res = await api.uploadFile(projectId, file, null, saveMarkdown, (s, data) => {
+        // Abort if controller was cancelled
+        if (controller.signal.aborted) return;
         const mapped = s === "converting" ? "converting" :
           s === "converted" ? "converted" :
           s === "saving_md" ? "saving_md" :
@@ -70,18 +78,29 @@ export default function UploadDialog({ open, projectId, onClose, onSuccess, t }:
         setStage(mapped as Stage);
         setProgress(stageMap[mapped as Stage]?.pct ?? 0);
         if (s === "error") setError(data?.message ?? "Unknown error");
-      });
+      }, controller.signal);
+      if (controller.signal.aborted) return;
       setResult(res);
       setStage("done");
       setProgress(100);
       message.success(t("上传成功!", "Upload successful!"));
       onSuccess();
     } catch (e: any) {
+      if (e.name === "AbortError") return; // user cancelled, no error needed
       setStage("error");
       setError(e.message);
     } finally {
       setUploading(false);
+      abortRef.current = null;
     }
+  };
+
+  const handleCancel = () => {
+    if (uploading && abortRef.current) {
+      abortRef.current.abort();
+      message.info(t("已取消上传", "Upload cancelled"));
+    }
+    onClose();
   };
 
   return (
@@ -89,11 +108,14 @@ export default function UploadDialog({ open, projectId, onClose, onSuccess, t }:
       open={open}
       title={t("上传文件", "Upload File")}
       onOk={handleUpload}
-      onCancel={onClose}
+      onCancel={handleCancel}
       confirmLoading={uploading}
       okText={t("上传", "Upload")}
       cancelText={t("取消", "Cancel")}
       okButtonProps={{ disabled: fileList.length === 0 || uploading }}
+      cancelButtonProps={{ disabled: false }}
+      maskClosable={!uploading}
+      keyboard={!uploading}
       width={580}
     >
       <Dragger
@@ -121,14 +143,14 @@ export default function UploadDialog({ open, projectId, onClose, onSuccess, t }:
 
       <div style={{ marginTop: 16 }}>
         <Space>
-          <Switch checked={saveMarkdown} onChange={setSaveMarkdown} />
+          <Switch checked={saveMarkdown} onChange={setSaveMarkdown} disabled={uploading} />
           <Text>{t("保存 Markdown 文件", "Save Markdown file")}</Text>
         </Space>
       </div>
 
       {uploading && (
         <div style={{ marginTop: 16 }}>
-          <Progress percent={progress} status="active" />
+          <Progress percent={progress} status={stage === "error" ? "exception" : "active"} />
           <Text type="secondary">{stageMap[stage]?.label}</Text>
         </div>
       )}

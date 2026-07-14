@@ -11,7 +11,7 @@
 #   ├── frontend/
 #   └── ...
 # =============================================================================
-set -e
+set -eo pipefail
 
 # Colors
 RED='\033[0;31m'
@@ -171,7 +171,12 @@ fi
 # =============================================================================
 log "Setting up SAG database..."
 cd "$SAG_DIR"
-npm run db:setup --silent 2>&1 | sed 's/^/  /'
+npm run db:setup 2>&1 | sed 's/^/  /'
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    err "  Database setup failed. Check the error above."
+    cd "$SCRIPT_DIR"
+    exit 1
+fi
 cd "$SCRIPT_DIR"
 log "  Database ready."
 
@@ -189,7 +194,7 @@ log "========================================="
 log " Starting WRAG services..."
 log "========================================="
 log ""
-log "  WRAG Backend:  http://localhost:8000"
+log "  WRAG Backend:  http://localhost:8555"
 log "  WRAG Frontend: http://localhost:5174"
 log "  SAG API:       http://localhost:4173 (internal)"
 log ""
@@ -216,7 +221,7 @@ log "  Backend PID: $BACKEND_PID"
 
 log "  Waiting for backend to become ready..."
 for i in $(seq 1 60); do
-    if curl -s http://localhost:8000/health >/dev/null 2>&1; then
+    if curl -s http://localhost:8555/health >/dev/null 2>&1; then
         log "  Backend is ready!"
         break
     fi

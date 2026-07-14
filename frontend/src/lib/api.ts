@@ -1,4 +1,4 @@
-/** Frontend API client — calls WRAG backend (port 8000). */
+/** Frontend API client — calls WRAG backend (port 8555). */
 
 import type {
   SourceRecord,
@@ -209,7 +209,8 @@ export const api = {
     file: File,
     title: string | null,
     saveMarkdown: boolean,
-    onProgress?: (stage: string, data: any) => void
+    onProgress?: (stage: string, data: any) => void,
+    signal?: AbortSignal
   ): Promise<UploadResult> {
     const formData = new FormData();
     formData.append("file", file);
@@ -220,6 +221,7 @@ export const api = {
     const resp = await fetch("/api/wrag/upload/stream", {
       method: "POST",
       body: formData,
+      signal,
     });
 
     if (!resp.ok || !resp.body) {

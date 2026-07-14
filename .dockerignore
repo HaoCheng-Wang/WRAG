@@ -1,0 +1,14 @@
+.venv/
+node_modules/
+md_storage/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+README.md
+README-CN.md
+WRAG_方案.md
+start.sh
+docker-compose.yml
+docker-start.sh
+.vscode/

@@ -30,3 +30,7 @@ Thumbs.db
 # Sub-projects (users clone these separately)
 markitdown/
 SAG/
+
+# WRAG root npm (MCP HTTP bridge dependency)
+node_modules/
+package-lock.json

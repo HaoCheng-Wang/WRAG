@@ -153,7 +153,7 @@ async def upload_file(
             project_id=project_id,
             title=doc_title,
             content=markdown_content,
-            file_name=original_filename,
+            file_name=f"{doc_title}.md",
         )
 
         # Step 4: Record import
@@ -254,7 +254,7 @@ async def upload_file_stream(
                 project_id=project_id,
                 title=doc_title,
                 content=markdown_content,
-                file_name=original_filename,
+                file_name=f"{doc_title}.md",
             )
             yield _send("ingested", f'{{"stage":"ingested","document_id":"{result.get("documentId","")}"}}')
 
@@ -370,6 +370,16 @@ async def import_md_file(file_id: str, body: ImportRequest):
 
     doc_title = body.title or Path(record["original_filename"]).stem
 
+    # Check for existing import (prevent duplicate SAG ingestion)
+    existing_imports = await md_store.get_imports(file_id)
+    for imp in existing_imports:
+        if imp["project_id"] == body.project_id:
+            raise HTTPException(
+                status_code=409,
+                detail=f"File already imported into project '{body.project_id}'. "
+                       "Delete the document from SAG first to re-import.",
+            )
+
     sag = get_sag_client()
     try:
         result = await sag.upload_document(
@@ -379,13 +389,6 @@ async def import_md_file(file_id: str, body: ImportRequest):
             file_name=f"{doc_title}.md",
         )
     except Exception as e:
-        # Check if it's a UNIQUE constraint violation
-        if hasattr(e, "response") and e.response is not None:
-            raise HTTPException(
-                status_code=409,
-                detail=f"This file may have already been imported into project '{body.project_id}'. "
-                       "Delete the document from SAG first to re-import.",
-            )
         raise HTTPException(status_code=502, detail=f"SAG ingestion failed: {e}")
 
     await md_store.record_import(
