@@ -67,13 +67,15 @@ The resulting directory layout:
 WRAG/
 ├── start.sh              # One-click startup
 ├── docker-compose.yml    # PostgreSQL container
-├── .env.example          # Configuration template
+├── .env                  # WRAG config (auto-created by start.sh)
+├── .env.example          # WRAG config template
 ├── requirements.txt      # Python dependencies
 ├── README.md
 ├── backend/              # FastAPI application
 ├── frontend/             # React SPA (Ant Design 5)
 ├── markitdown/           # git clone from microsoft/markitdown
 ├── SAG/                  # git clone from Zleap-AI/SAG
+│   └── .env              # SAG / AI config (auto-created by start.sh)
 ├── .venv/                # Created by start.sh
 └── md_storage/           # Created at runtime — persisted .md files
 ```
@@ -82,34 +84,67 @@ Then open: **http://localhost:5174**
 
 `start.sh` will:
 1. Check that `markitdown/` and `SAG/` directories exist
-2. Create Python virtual environment (`.venv`) and install dependencies
-3. Install SAG npm dependencies
-4. Start PostgreSQL via Docker
-5. Initialize SAG database
-6. Start WRAG backend (which auto-starts SAG API)
-7. Start WRAG frontend dev server
+2. Smart-sync `.env` files from `.env.example` — create if missing, add new keys without overwriting existing
+3. Create Python virtual environment (`.venv`) and install dependencies
+4. Install SAG npm dependencies
+5. Install WRAG Frontend npm dependencies
+6. Start PostgreSQL via Docker
+7. Initialize SAG database (migrations + seed)
+8. Create `md_storage/` directory
+9. Start WRAG backend (which auto-starts SAG API)
+10. Start WRAG frontend dev server
+11. Remind about AI API key configuration if keys are missing
 
-### Manual Setup
+> **💡 SAG runs in local fallback mode without API keys.** You can explore the UI first, then configure AI keys later.
+
+### Configuring AI Features
+
+After the first run, edit the configuration files to enable full AI-powered retrieval:
+
+| File | Purpose | Key variables to set |
+|------|---------|---------------------|
+| `SAG/.env` | AI models & API keys | `EMBEDDING_API_KEY`, `LLM_API_KEY` |
+| `.env` | WRAG server settings | `WRAG_PORT`, `WRAG_MAX_UPLOAD_SIZE_MB` |
+
+Then restart:
+
+```bash
+./start.sh
+```
+
+> **Note:** `start.sh` performs a smart sync — if `.env.example` has new variables after an upgrade, they are automatically appended to your `.env` with a `[NEW]` marker. Your existing settings are never overwritten.
+
+### Manual Setup (without start.sh)
+
+This section shows what `start.sh` does internally. Use this for debugging or manual deployment.
 
 ```bash
 # Prerequisites: clone markitdown and SAG inside WRAG/ first
 
-# 1. Python venv
+# 1. Create environment files
+cp .env.example .env
+cp SAG/.env.example SAG/.env
+# Edit both files to configure API keys and settings
+
+# 2. Python venv
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e ./markitdown/packages/markitdown[all]
 
-# 2. SAG dependencies
+# 3. SAG dependencies
 cd SAG && npm install && cd ..
 
-# 3. PostgreSQL
+# 4. WRAG Frontend dependencies
+cd frontend && npm install && cd ..
+
+# 5. PostgreSQL
 docker compose up -d postgres
 
-# 4. Database setup
+# 6. Database setup
 cd SAG && npm run db:setup && cd ..
 
-# 5. Start (two terminals)
+# 7. Start (two terminals)
 python backend/main.py          # Terminal 1: WRAG backend
 cd frontend && npm run dev      # Terminal 2: WRAG frontend
 ```
@@ -118,27 +153,47 @@ cd frontend && npm run dev      # Terminal 2: WRAG frontend
 
 ## Configuration
 
-Copy `.env.example` to `.env` and customize:
-
-### WRAG-specific settings
+### WRAG settings (`.env`)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WRAG_HOST` | `0.0.0.0` | Backend bind address |
 | `WRAG_PORT` | `8000` | Backend port |
-| `SAG_API_URL` | `http://127.0.0.1:4173` | SAG API address |
-| `MD_STORAGE_DIR` | `md_storage` | Markdown file storage |
+| `SAG_API_URL` | `http://127.0.0.1:4173` | Internal SAG API address |
+| `MD_STORAGE_DIR` | `md_storage` | Markdown file storage directory |
 | `WRAG_MAX_UPLOAD_SIZE_MB` | *(blank)* | Max upload size in MB. Blank = no limit |
+| `DATABASE_URL` | `postgres://sag_lite:sag_lite_pass@localhost:5432/sag_lite` | PostgreSQL connection |
 
-### SAG / AI settings (passed through)
+### SAG / AI settings (`SAG/.env`)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `NODE_ENV` | `development` | Environment |
+| `LOG_LEVEL` | `info` | Logging level |
+| `HTTP_HOST` | `0.0.0.0` | SAG API bind address |
+| `HTTP_PORT` | `4173` | SAG API port |
 | `DATABASE_URL` | `postgres://sag_lite:sag_lite_pass@localhost:5432/sag_lite` | PostgreSQL connection |
-| `EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model |
-| `EMBEDDING_BASE_URL` | `https://api.302ai.cn/v1` | Embedding API endpoint |
-| `LLM_MODEL` | `qwen3.6-flash` | LLM model |
-| `LLM_BASE_URL` | `https://api.302ai.cn/v1` | LLM API endpoint |
+| `DEFAULT_TENANT_ID` | `default` | Multi-tenant ID |
+| `AUTH_MODE` | `none` | Auth mode (none/bearer/external) |
+| `EMBEDDING_DIMENSIONS` | `1024` | Vector dimensions |
+| `EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model name |
+| `EMBEDDING_API_KEY` | *(blank)* | API key for embedding service |
+| `EMBEDDING_BASE_URL` | `https://api.302ai.cn/v1` | Embedding API base URL |
+| `LLM_MODEL` | `qwen3.6-flash` | LLM model name |
+| `LLM_API_KEY` | *(blank)* | API key for LLM service |
+| `LLM_BASE_URL` | `https://api.302ai.cn/v1` | LLM API base URL |
+| `LLM_TIMEOUT_MS` | `60000` | LLM request timeout (ms) |
+| `LLM_MAX_RETRIES` | `2` | LLM retry count |
+| `RERANK_MODEL` | `qwen3-rerank` | Rerank model name |
+| `RERANK_BASE_URL` | *(blank, falls back to `LLM_BASE_URL`)* | Rerank API base URL |
+| `RERANK_INSTRUCT` | *(instruction text)* | Rerank prompt instruction |
+| `DEFAULT_SEARCH_MODE` | `fast` | Default search mode (fast/standard) |
+| `INGEST_CONCURRENCY` | `5` | Concurrent chunk processing limit |
+| `MCP_TRANSPORT` | `stdio` | MCP transport protocol |
+| `MCP_HTTP_PORT` | `4174` | MCP HTTP port |
+| `MCP_TOOL_TIMEOUT_MS` | `300000` | MCP tool timeout (ms) |
+
+> When no API keys are configured, SAG uses deterministic local fallbacks: SHA-256 embeddings, regex-based entity extraction, and lexical keyword reranking. The system boots and functions without remote API access.
 
 ---
 
