@@ -22,17 +22,26 @@
 ## 1. 架构总览
 
 ```
+                   ┌──────────────────────────────┐
+                   │   AI 智能体 (Claude Desktop,  │
+                   │   Cursor, 自定义客户端)        │
+                   └──────────┬───────────────────┘
+                              │ MCP 协议 (HTTP/SSE)
+                              ▼ 端口 4174
 WRAG 前端 (React 19 + Ant Design 5, 端口 5174)
        │  Vite 代理 /api → http://127.0.0.1:8555
        ▼
 WRAG 后端 (FastAPI + Python, 端口 8555)
-  ├── POST /api/wrag/upload         → 文件上传 + 格式转换 + 入库
-  ├── POST /api/wrag/upload/stream  → 同上 + SSE 流式进度推送
-  ├── /api/wrag/markdown/*          → Markdown 文件 CRUD 管理
-  └── /api/{path:path}              → 透明反向代理到 SAG（最后注册！）
+  ├── POST /api/wrag/upload          → 文件上传 + 格式转换 + 入库
+  ├── POST /api/wrag/upload/stream   → 同上 + SSE 流式进度推送
+  ├── /api/wrag/markdown/*           → Markdown 文件 CRUD 管理
+  ├── /api/wrag/mcp/bind             → 动态切换 MCP 项目绑定
+  └── /api/{path:path}               → 透明反向代理到 SAG（最后注册！）
        │
-       ▼
-SAG 后端 (Fastify, 端口 4173) — 原封不动
+       ├──────────────────────────────┐
+       ▼                              ▼
+SAG 后端 (Fastify, 端口 4173)    MCP HTTP 桥接器 (端口 4174)
+  原封不动                            由 WRAG 后端管理，自动发现项目
        │
        ▼
 PostgreSQL 16 + pgvector (Docker, 端口 5432)
@@ -40,15 +49,17 @@ PostgreSQL 16 + pgvector (Docker, 端口 5432)
 
 **关键设计决策**：
 
-| 决策 | 选择 | 原因 |
-|------|------|------|
-| WRAG 端口 | 8555（非 8000） | 避开常见端口冲突 |
-| SAG 管理方式 | 子进程（subprocess.Popen） | 一键启动，无需手动编排 |
-| SAG 前端 | **不启动** | WRAG 用自己的 Ant Design 前端替代 |
-| 前端 UI 框架 | Ant Design 5 | 与 SAG 的 Tailwind 明显区隔，中文友好 |
-| 元数据存储 | SQLite（md_storage/metadata.db） | 轻量，无需额外容器 |
-| 文件大小限制 | 默认不限制（None） | markitdown 本身无限制，由用户按需设定 |
-| Markdown 编辑 | 仅改缓存，不自动同步 KB | 避免数据一致性复杂问题 |
+| 决策          | 选择                             | 原因                                  |
+| ------------- | -------------------------------- | ------------------------------------- |
+| WRAG 端口     | 8555（非 8000）                  | 避开常见端口冲突                      |
+| SAG 管理方式  | 子进程（subprocess.Popen）       | 一键启动，无需手动编排                |
+| MCP 桥接器    | Node.js HTTP 包装，不修改 SAG    | 导入 buildMcpServer()，零 SAG 代码改动 |
+| MCP 项目绑定  | 自动发现 + 前端动态切换           | 启动时自动绑定第一个项目，前端可随时切换 |
+| SAG 前端      | **不启动**                       | WRAG 用自己的 Ant Design 前端替代     |
+| 前端 UI 框架  | Ant Design 5                     | 与 SAG 的 Tailwind 明显区隔，中文友好 |
+| 元数据存储    | SQLite（md_storage/metadata.db） | 轻量，无需额外容器                    |
+| 文件大小限制  | 默认不限制（None）               | markitdown 本身无限制，由用户按需设定 |
+| Markdown 编辑 | 仅改缓存，不自动同步 KB          | 避免数据一致性复杂问题                |
 
 ---
 
@@ -241,6 +252,8 @@ router = APIRouter()
 @router.post("/api/wrag/upload/stream")
 @router.get("/api/wrag/markdown")
 # ... 更多 markdown 管理端点
+@router.get("/api/wrag/mcp/binding")        # 查询当前 MCP 绑定的项目
+@router.post("/api/wrag/mcp/bind")          # 动态切换 MCP 项目绑定（重启桥接器）
 
 # 2. SAG 代理（必须最后注册，否则会劫持 WRAG 路由）
 @router.api_route("/api/{path:path}", methods=["GET","POST",...,"DELETE"])
@@ -383,6 +396,7 @@ CREATE TABLE md_imports (
 ```
 
 **核心设计原则**：
+
 - 删除 md 文件 ≠ 删除知识库文档（两者独立管理）
 - 在线编辑 md 只改本地缓存，不会自动同步到知识库
 - 使用 `INSERT OR IGNORE` 处理重复导入记录（但前端必须先检查再调用 SAG，见 3.3 节）
@@ -410,16 +424,16 @@ def convert_to_markdown(file_path: str) -> str:
 
 ### 4.1 技术栈
 
-| 技术 | 版本 | 用途 |
-|------|------|------|
-| React | 19 | 框架 |
-| TypeScript | 5+ | 类型安全 |
-| Vite | 6 | 构建工具（端口 5174） |
-| Ant Design | 5 | UI 组件库 |
-| @ant-design/icons | - | 图标 |
-| @xyflow/react | - | 知识图谱画布 |
-| react-markdown | - | Markdown 渲染 |
-| dayjs | - | 日期格式化 |
+| 技术              | 版本 | 用途                  |
+| ----------------- | ---- | --------------------- |
+| React             | 19   | 框架                  |
+| TypeScript        | 5+   | 类型安全              |
+| Vite              | 6    | 构建工具（端口 5174） |
+| Ant Design        | 5    | UI 组件库             |
+| @ant-design/icons | -    | 图标                  |
+| @xyflow/react     | -    | 知识图谱画布          |
+| react-markdown    | -    | Markdown 渲染         |
+| dayjs             | -    | 日期格式化            |
 
 ### 4.2 Vite 配置
 
@@ -496,6 +510,7 @@ async function readSse<T>(resp: Response, onEvent: (e: T) => void) {
 ### 4.4 UploadDialog — 上传弹窗（关键组件）
 
 **必须支持的功能**：
+
 - 拖拽/点击上传
 - 显示支持的文件格式列表
 - SSE 进度条（converting → saving_md → ingesting → done）
@@ -552,13 +567,58 @@ function UploadDialog({ open, projectId, onClose, onSuccess, t }) {
 
 ### 4.5 页面概览
 
-| 页面 | 功能 | 关键组件 |
-|------|------|----------|
-| Chat | 对话式 RAG，SSE 流式响应 | MessageList, InputArea, CitationDrawer |
-| Documents | 文档管理 + 上传 | Stats cards, Upload list, Detail tabs |
-| Graph | 知识图谱（ReactFlow） | 实体/事件节点，力导向图 |
-| MCP | MCP 配置展示 | JSON 代码块，工具列表 |
-| Markdown Files | Markdown 文件管理 | Table, Preview, Edit, Import, Delete |
+WRAG 前端共 5 个标签页，与 SAG 保持功能一致但使用 Ant Design 风格：
+
+| 页面           | 功能                     | 关键特性                                                      |
+| -------------- | ------------------------ | ------------------------------------------------------------- |
+| Chat           | 对话式 RAG，SSE 流式响应 | Markdown 渲染（表格/代码块/引用）、引用标记条、运行中搜索显示、会话清空/删除 |
+| Documents      | 文档管理 + 上传          | 统计卡片、上传队列面板（进度条+阶段）、归档/恢复、文档重命名、检索模式切换 |
+| Graph          | 知识图谱（ReactFlow）    | 实体类型着色节点、事件节点，双击打开详情抽屉                  |
+| MCP            | MCP 配置 + 项目绑定      | 动态项目绑定选择器（即时切换）、HTTP JSON 配置（动态 host）、工具卡片可展开 |
+| Markdown Files | Markdown 文件管理        | 表格列表、预览（ReactMarkdown）、在线编辑、下载、导入、删除   |
+
+**Chat 页面核心功能**：
+
+- 消息气泡（用户蓝色/AI 灰色），时间戳 + 角色标签
+- Markdown 消息体：代码块（```）、表格、标题、粗体、行内代码、引用链接 `[1]` `[2]`
+- 引用条：AI 消息下方显示可点击的引用编号，点击打开 CitationDrawer
+- 运行中搜索卡片：当 MCP 调用 `sag_search` 时展示查询文本和搜索模式
+- 流式文本：`assistant_delta` 事件实时追加显示
+- 会话管理：顶部显示会话标题/模型/ID、清空记录、删除对话
+- 停止按钮：AbortController 即时中断 + 错误友好展示
+- 空状态："先创建项目" / "还没有对话"
+
+**Documents 页面核心功能**：
+
+- 左面板：项目统计、可折叠上传队列（进度条 + 阶段标签 + 切片/事件数）、归档开关、文档列表
+- 右面板 5 个子标签：概览 / 切片 / 事件 / 实体 / 检索
+- 检索标签内嵌 Fast/Standard 模式切换 + SSE 流式搜索
+- 文档操作：重命名、归档/恢复、永久删除
+
+**MCP 页面核心功能**：
+
+- 项目绑定选择器：下拉选择项目 → 点击「切换绑定」→ 后台 API 重启 MCP 桥
+- 配置 JSON：动态读取 `window.location.hostname`，不硬编码 localhost
+- 工具卡片：点击展开显示 inputSchema + 调用示例 JSON
+- 当前绑定状态显示
+
+**关键 React 模式**（避免陷阱）：
+
+```typescript
+// ⚠️ SSE 回调中的闭包陷阱：用 useRef 同步最新值
+const mcpDetailRef = useRef(mcpDetail);
+mcpDetailRef.current = mcpDetail;
+
+function handleStreamEvent(event) {
+  const detail = mcpDetailRef.current; // 始终读到最新值
+  // ...
+}
+
+// ⚠️ 不要在 JSX 中直接调用 Hook（如 theme.useToken()）
+// 必须在组件顶层调用：
+const { token } = theme.useToken(); // ✅
+// <div style={{ color: theme.useToken().color }} /> // ❌ 白屏！
+```
 
 ---
 
@@ -585,9 +645,45 @@ services:
       timeout: 5s
       retries: 20
 
+  wrag:
+    build: .
+    container_name: wrag_app
+    ports:
+      - "8555:8555"       # 前端 UI + REST API
+      - "4174:4174"       # MCP 协议端口（供 AI 客户端直连）
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      DATABASE_URL: postgres://sag_lite:sag_lite_pass@postgres:5432/sag_lite
+      WRAG_HOST: 0.0.0.0
+      WRAG_PORT: 8555
+      SAG_API_URL: http://127.0.0.1:4173
+      # WRAG_MAX_UPLOAD_SIZE_MB: 100     # 可选：启用文件大小限制
+      # WRAG_MCP_SOURCE_ID: project-uuid  # 可选：固定绑定项目，留空自动发现
+    volumes:
+      - wrag_md_storage:/app/md_storage
+
 volumes:
   wrag_pgdata:
+  wrag_md_storage:
 ```
+
+**Docker entrypoint 流程**（`docker-entrypoint.sh`）：
+
+```
+1. 等待 PostgreSQL 就绪（Python socket 检查）
+2. 确保 SAG/.env 存在（不存在则复制 .env.example）
+3. 初始化 SAG 数据库（npm run db:setup — 幂等操作）
+4. 启动 SAG 后端（npm run dev:api，后台运行，端口 4173）
+5. 等待 SAG 健康检查通过
+6. 启动 WRAG 后端（前台运行，端口 8555）
+   └── WRAG 后端自动：发现第一个 SAG 项目 → 启动 MCP HTTP 桥（端口 4174）
+```
+
+**关键变化**：MCP 桥由 WRAG 后端 `main.py` 管理生命周期（启动时自动发现项目绑定），entrypoint 不再单独启动 MCP 桥。这确保了 Docker 与开发环境行为一致，且支持前端动态切换绑定。
 
 ### 5.2 .env 文件配置
 
@@ -816,6 +912,7 @@ cd frontend && npm run dev
 **问题**：SAG 的 `/api/documents/upload` 接口通过 `file_name` 扩展名判断文件类型。如果传 `report.pdf`，SAG 会返回 400。
 
 **规避**：**所有**调用 `sag.upload_document()` 的地方，`file_name` 必须传 `f"{doc_title}.md"`。共涉及 3 处：
+
 - 普通上传（`/api/wrag/upload`）
 - SSE 流式上传（`/api/wrag/upload/stream`）
 - Markdown 文件重新导入（`/api/wrag/markdown/{id}/import`）
@@ -823,10 +920,12 @@ cd frontend && npm run dev
 ### 陷阱 2：健康检查不能用同步阻塞
 
 **问题**：`time.sleep()` 会阻塞 FastAPI 的事件循环，导致：
+
 - Ctrl+C 无法响应（shutdown 信号被阻塞）
 - 其他协程无法执行
 
 **规避**：
+
 - 用 `asyncio.sleep()` 替代 `time.sleep()`
 - 用 `asyncio.to_thread(urllib.request.urlopen, url, None, timeout)` 替代 `urllib.request.urlopen(url)`
 - 引入 `_shutdown_event: asyncio.Event`，每次轮询前检查
@@ -854,6 +953,7 @@ cd frontend && npm run dev
 **问题**：上传卡住时，点击取消按钮无反应，用户只能刷新页面。
 
 **规避**：
+
 - 使用 `AbortController` 贯穿 fetch 调用链
 - 上传开始时创建 `const controller = new AbortController()`，取消时 `controller.abort()`
 - fetch 传入 `signal: controller.signal`
@@ -901,23 +1001,32 @@ cd frontend && npm run dev
 
 ## 附：SAG/.env 完整配置清单
 
-| 变量 | 默认值 | 说明 | 陷阱 |
-|------|--------|------|------|
-| `NODE_ENV` | `development` | 运行环境 | |
-| `HTTP_HOST` | `0.0.0.0` | SAG 绑定地址 | 不要被 WRAG 覆盖 |
-| `HTTP_PORT` | `4173` | SAG 端口 | |
-| `DATABASE_URL` | - | PostgreSQL 连接串 | 只属于 SAG，WRAG 不涉及 |
-| `EMBEDDING_API_KEY` | - | Embedding 服务密钥 | 留空则用本地 SHA-256 回退 |
-| `LLM_API_KEY` | - | LLM 服务密钥 | 留空则用本地回退 |
-| `RERANK_BASE_URL` | 回退到 `LLM_BASE_URL` | Rerank API 地址 | **必须注释掉**，不能留空 |
-| `INGEST_CONCURRENCY` | `5` | 入库并发数 | **建议注释掉**，用默认值 |
+| 变量                   | 默认值                 | 说明               | 陷阱                           |
+| ---------------------- | ---------------------- | ------------------ | ------------------------------ |
+| `NODE_ENV`           | `development`        | 运行环境           |                                |
+| `HTTP_HOST`          | `0.0.0.0`            | SAG 绑定地址       | 不要被 WRAG 覆盖               |
+| `HTTP_PORT`          | `4173`               | SAG 端口           |                                |
+| `DATABASE_URL`       | -                      | PostgreSQL 连接串  | 只属于 SAG，WRAG 不涉及        |
+| `EMBEDDING_API_KEY`  | -                      | Embedding 服务密钥 | 留空则用本地 SHA-256 回退      |
+| `LLM_API_KEY`        | -                      | LLM 服务密钥       | 留空则用本地回退               |
+| `RERANK_BASE_URL`    | 回退到`LLM_BASE_URL` | Rerank API 地址    | **必须注释掉**，不能留空 |
+| `INGEST_CONCURRENCY` | `5`                  | 入库并发数         | **建议注释掉**，用默认值 |
 
 ---
 
 > **总结**：本文档将开发过程中遇到的所有 Bug 的修复方案直接内化到了设计决策和代码示例中。按照本文档开发，可以避免：
+>
 > 1. 上传卡死（文件名扩展名 + 取消按钮）
 > 2. Ctrl+C 停不下来（同步阻塞）
 > 3. 重复导入（缺少预检查）
+> 4. .env 被覆盖（默认值智能同步）
+> 5. RERANK_BASE_URL 空值报错（Zod 校验陷阱）
+> 6. INGEST_CONCURRENCY 空值报错（同上）
+> 7. 前端取消按钮无效（缺少 AbortController）
+> 8. MCP 项目绑定需要人工配置（自动发现）
+> 9. MCP 桥 "Already initialized"（单 transport 实例）
+> 10. SSE 回调过时状态（useRef 同步）
+> 11. JSX 中调用 Hook 导致白屏（theme.useToken() 位置错误）
 > 4. Zod 校验崩溃（空环境变量）
 > 5. 路由劫持（注册顺序错误）
 > 6. 环境变量覆盖（SAG 配置被覆盖）

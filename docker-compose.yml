@@ -39,8 +39,8 @@ services:
       SAG_API_URL: http://127.0.0.1:4173
       # === 可选：文件上传大小限制（MB），取消注释启用 ===
       # WRAG_MAX_UPLOAD_SIZE_MB: 100
-      # === 可选：MCP 协议桥接，填入项目 UUID 启用 ===
-      # 在前端创建项目后，从 URL 复制 projectId 填入此处
+      # === MCP 桥接器：留空则自动绑定第一个项目，填写则固定绑定指定项目 ===
+      # （项目 UUID 可在前端创建项目后从浏览器地址栏获取）
       # WRAG_MCP_SOURCE_ID: your-project-uuid-here
     volumes:
       # Markdown 文件持久化

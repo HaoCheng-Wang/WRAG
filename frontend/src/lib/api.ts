@@ -1,4 +1,8 @@
-/** Frontend API client — calls WRAG backend (port 8555). */
+/** Frontend API client — calls WRAG backend (port 8555).
+ *
+ *  Covers all SAG endpoints (proxied via WRAG) plus WRAG-specific
+ *  endpoints for upload and markdown management.
+ */
 
 import type {
   SourceRecord,
@@ -22,6 +26,7 @@ import type {
   PublicAiProviderSettings,
   PublicMcpSettings,
   FormatsInfo,
+  ModelCallLogRecord,
 } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -42,7 +47,8 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const text = await resp.text();
   const data = safeJson(text);
   if (!resp.ok) {
-    throw new Error(data?.detail ?? data?.error?.message ?? `Request failed: ${resp.status}`);
+    const msg = data?.detail ?? data?.error?.message ?? `Request failed: ${resp.status}`;
+    throw new Error(msg);
   }
   return data as T;
 }
@@ -61,7 +67,14 @@ async function readSse<T>(resp: Response, onEvent: (e: T) => void) {
     for (const part of parts) {
       const dataLine = part.split("\n").find((l) => l.startsWith("data: "));
       if (!dataLine) continue;
-      onEvent(JSON.parse(dataLine.slice(6)) as T);
+      try { onEvent(JSON.parse(dataLine.slice(6)) as T); } catch { /* ignore malformed */ }
+    }
+  }
+  // Flush remaining
+  if (buf.trim()) {
+    const dataLine = buf.split("\n").find((l) => l.startsWith("data: "));
+    if (dataLine) {
+      try { onEvent(JSON.parse(dataLine.slice(6)) as T); } catch { /* ignore */ }
     }
   }
 }
@@ -77,10 +90,14 @@ export const api = {
     return request<{ projects: SourceRecord[] }>(`/api/projects${q}`);
   },
   async createProject(input: { name: string; description?: string | null }) {
-    return request<{ project: SourceRecord }>("/api/projects", { method: "POST", body: JSON.stringify(input) });
+    return request<{ project: SourceRecord }>("/api/projects", {
+      method: "POST", body: JSON.stringify(input),
+    });
   },
   async updateProject(projectId: string, input: { name?: string; description?: string | null }) {
-    return request<{ project: SourceRecord }>(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify(input) });
+    return request<{ project: SourceRecord }>(`/api/projects/${projectId}`, {
+      method: "PATCH", body: JSON.stringify(input),
+    });
   },
   async archiveProject(projectId: string) {
     return request<{ project: SourceRecord }>(`/api/projects/${projectId}/archive`, { method: "POST" });
@@ -116,7 +133,9 @@ export const api = {
     return request<{ entities: EntityRecord[] }>(`/api/documents/${documentId}/entities`);
   },
   async updateDocument(documentId: string, input: { title?: string }) {
-    return request<{ document: DocumentRecord }>(`/api/documents/${documentId}`, { method: "PATCH", body: JSON.stringify(input) });
+    return request<{ document: DocumentRecord }>(`/api/documents/${documentId}`, {
+      method: "PATCH", body: JSON.stringify(input),
+    });
   },
   async archiveDocument(documentId: string) {
     return request<{ document: DocumentRecord }>(`/api/documents/${documentId}/archive`, { method: "POST" });
@@ -136,18 +155,50 @@ export const api = {
     return request<EntityDetailRecord>(`/api/entities/${entityId}`);
   },
 
+  // -- Upload (SAG) -------------------------------------------------------
+  async createUploadJob(input: {
+    sourceId?: string;
+    title?: string;
+    fileName: string;
+    content: string;
+    chunking?: { mode?: string; maxTokens?: number; overlapTokens?: number };
+  }) {
+    return request<{ job: UploadJobRecord }>("/api/documents/upload/jobs", {
+      method: "POST", body: JSON.stringify(input),
+    });
+  },
+  async getUploadJob(jobId: string) {
+    return request<{ job: UploadJobRecord }>(`/api/documents/upload/jobs/${jobId}`);
+  },
+
+  // -- Model Call Logs ----------------------------------------------------
+  async listModelCallLogs(afterSequence = 0) {
+    return request<{ logs: ModelCallLogRecord[]; latestSequence: number }>(
+      `/api/model-call-logs?after=${encodeURIComponent(String(afterSequence))}`
+    );
+  },
+
   // -- Search -------------------------------------------------------------
   async search(input: { query: string; sourceIds: string[]; searchMode?: SearchMode; topK?: number }) {
     return request<SearchResult>("/api/search", {
       method: "POST",
-      body: JSON.stringify({ query: input.query, sourceIds: input.sourceIds, strategy: "multi", searchMode: input.searchMode ?? "fast", returnTrace: true, topK: input.topK }),
+      body: JSON.stringify({
+        query: input.query, sourceIds: input.sourceIds, strategy: "multi",
+        searchMode: input.searchMode ?? "fast", returnTrace: true, topK: input.topK,
+      }),
     });
   },
-  async streamSearch(input: { query: string; sourceIds: string[]; searchMode?: SearchMode; topK?: number }, onEvent: (e: SearchStreamEvent) => void) {
+  async streamSearch(
+    input: { query: string; sourceIds: string[]; searchMode?: SearchMode; topK?: number },
+    onEvent: (e: SearchStreamEvent) => void,
+  ) {
     const resp = await fetch("/api/search/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: input.query, sourceIds: input.sourceIds, strategy: "multi", searchMode: input.searchMode ?? "fast", returnTrace: true, topK: input.topK }),
+      body: JSON.stringify({
+        query: input.query, sourceIds: input.sourceIds, strategy: "multi",
+        searchMode: input.searchMode ?? "fast", returnTrace: true, topK: input.topK,
+      }),
     });
     if (!resp.ok || !resp.body) {
       const text = await resp.text();
@@ -158,11 +209,15 @@ export const api = {
 
   // -- MCP Sessions -------------------------------------------------------
   async listMcpSessions(projectId?: string) {
-    if (projectId) return request<{ sessions: McpSessionRecord[] }>(`/api/projects/${projectId}/mcp/sessions`);
+    if (projectId) {
+      return request<{ sessions: McpSessionRecord[] }>(`/api/projects/${projectId}/mcp/sessions`);
+    }
     return request<{ sessions: McpSessionRecord[] }>("/api/mcp/sessions");
   },
   async createMcpSession(input: { title?: string; sourceIds?: string[] }) {
-    return request<{ session: McpSessionRecord }>("/api/mcp/sessions", { method: "POST", body: JSON.stringify(input) });
+    return request<{ session: McpSessionRecord }>("/api/mcp/sessions", {
+      method: "POST", body: JSON.stringify(input),
+    });
   },
   async getMcpSession(sessionId: string) {
     return request<McpSessionDetail>(`/api/mcp/sessions/${sessionId}`);
@@ -173,7 +228,12 @@ export const api = {
   async deleteMcpSession(sessionId: string) {
     return request<{ deleted: boolean }>(`/api/mcp/sessions/${sessionId}`, { method: "DELETE" });
   },
-  async streamMcpMessage(sessionId: string, content: string, onEvent: (e: McpStreamEvent) => void, signal?: AbortSignal) {
+  async streamMcpMessage(
+    sessionId: string,
+    content: string,
+    onEvent: (e: McpStreamEvent) => void,
+    signal?: AbortSignal,
+  ) {
     const resp = await fetch(`/api/mcp/sessions/${sessionId}/messages/stream`, {
       method: "POST",
       signal,
@@ -194,8 +254,10 @@ export const api = {
   async getMcpSettings() {
     return request<{ settings: PublicMcpSettings }>("/api/settings/mcp");
   },
-  async updateAiSettings(input: any) {
-    return request<{ settings: PublicAiProviderSettings }>("/api/settings/ai", { method: "PUT", body: JSON.stringify(input) });
+  async updateAiSettings(input: Record<string, unknown>) {
+    return request<{ settings: PublicAiProviderSettings }>("/api/settings/ai", {
+      method: "PUT", body: JSON.stringify(input),
+    });
   },
 
   // -- WRAG: Formats ------------------------------------------------------
@@ -203,36 +265,30 @@ export const api = {
     return request<FormatsInfo>("/api/formats");
   },
 
-  // -- WRAG: Upload -------------------------------------------------------
+  // -- WRAG: Upload (multi-format) ----------------------------------------
   async uploadFile(
     projectId: string,
     file: File,
     title: string | null,
     saveMarkdown: boolean,
     onProgress?: (stage: string, data: any) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<UploadResult> {
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("project_id", projectId);
-    if (title) formData.append("title", title);
-    formData.append("save_markdown", String(saveMarkdown));
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("project_id", projectId);
+    if (title) fd.append("title", title);
+    fd.append("save_markdown", String(saveMarkdown));
 
-    const resp = await fetch("/api/wrag/upload/stream", {
-      method: "POST",
-      body: formData,
-      signal,
-    });
-
+    const resp = await fetch("/api/wrag/upload/stream", { method: "POST", body: fd, signal });
     if (!resp.ok || !resp.body) {
       const text = await resp.text();
       throw new Error(safeJson(text)?.detail ?? `Upload failed: ${resp.status}`);
     }
-
     return new Promise((resolve, reject) => {
       readSse<any>(resp, (event) => {
         onProgress?.(event.stage ?? event, event);
-        if (event.stage === "done") resolve(event as any);
+        if (event.stage === "done") resolve(event as UploadResult);
         if (event.stage === "error") reject(new Error(event.message ?? "Upload error"));
       });
     });
@@ -245,9 +301,9 @@ export const api = {
   async getMdFile(fileId: string) {
     return request<MdFileInfo>(`/api/wrag/markdown/${fileId}`);
   },
-  async getMdFileContent(fileId: string) {
+  async getMdFileContent(fileId: string): Promise<string> {
     const resp = await fetch(`/api/wrag/markdown/${fileId}/content`);
-    if (!resp.ok) throw new Error("Failed to fetch content");
+    if (!resp.ok) throw new Error("Failed to fetch markdown content");
     return resp.text();
   },
   downloadMdFile(fileId: string) {
@@ -256,7 +312,7 @@ export const api = {
   async updateMdFileContent(fileId: string, content: string) {
     return request<{ id: string; md_size_bytes: number; updated_at: string }>(
       `/api/wrag/markdown/${fileId}/content`,
-      { method: "PATCH", body: JSON.stringify({ content }) }
+      { method: "PATCH", body: JSON.stringify({ content }) },
     );
   },
   async deleteMdFile(fileId: string) {
@@ -265,7 +321,7 @@ export const api = {
   async importMdFile(fileId: string, projectId: string) {
     return request<{ document_id: string; project_id: string }>(
       `/api/wrag/markdown/${fileId}/import`,
-      { method: "POST", body: JSON.stringify({ project_id: projectId }) }
+      { method: "POST", body: JSON.stringify({ project_id: projectId }) },
     );
   },
 };

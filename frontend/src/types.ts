@@ -1,106 +1,185 @@
-/** Shared type definitions for WRAG frontend. */
+/** Shared type definitions for WRAG frontend — aligned with SAG API response shapes. */
 
+// =========================================================================
 // Project
+// =========================================================================
 export interface SourceRecord {
   id: string;
+  tenantId?: string;
   name: string;
   description?: string | null;
-  created_at: string;
-  archived_at?: string | null;
-  tenant_id: string;
+  metadata?: Record<string, unknown>;
+  archivedAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
+// =========================================================================
 // Document
+// =========================================================================
 export interface DocumentRecord {
   id: string;
-  source_id: string;
+  sourceId: string;
   title: string;
-  file_name: string;
-  parse_status: string;
-  chunk_count: number;
-  event_count: number;
-  entity_count: number;
-  archived_at?: string | null;
-  created_at: string;
+  fileName?: string;
+  status?: string;
+  parseStatus?: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+  archivedAt?: string | null;
+  source?: SourceRecord;
 }
 
+// =========================================================================
 // Chunk
+// =========================================================================
+export interface EmbeddingPreview {
+  dimensions: number;
+  sample: number[];
+}
+
 export interface ChunkRecord {
   id: string;
+  sourceId?: string;
+  documentId?: string | null;
+  heading?: string | null;
   content: string;
-  embedding_preview?: number[];
+  rawContent?: string | null;
+  rank?: number;
+  references?: string[];
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  embedding?: EmbeddingPreview | null;
 }
 
+// =========================================================================
 // Entity
+// =========================================================================
 export interface EntityRecord {
   id: string;
-  name: string;
-  normalized_name: string;
+  sourceId?: string;
   type: string;
-  event_count: number;
+  name: string;
+  normalizedName?: string;
+  description?: string | null;
+  eventCount?: number;
+  score?: number;
+  embedding?: EmbeddingPreview | null;
 }
 
 export interface EntityDetailRecord {
-  id: string;
-  name: string;
-  normalized_name: string;
-  type: string;
+  entity: EntityRecord & { eventCount: number };
   events: EventRecord[];
+  source?: SourceRecord | null;
 }
 
+// =========================================================================
 // Event
+// =========================================================================
 export interface EventRecord {
   id: string;
+  sourceId?: string;
+  documentId?: string | null;
+  chunkId?: string | null;
   title: string;
+  summary?: string;
   content: string;
-  entities: EntityRecord[];
+  rank?: number;
+  score?: number;
+  entityCount?: number;
+  entities?: EntityRecord[];
+  titleEmbedding?: EmbeddingPreview | null;
+  contentEmbedding?: EmbeddingPreview | null;
 }
 
 export interface EventDetailRecord {
-  id: string;
-  title: string;
-  content: string;
+  event: EventRecord;
   entities: EntityRecord[];
-  document?: DocumentRecord;
-  chunk?: ChunkRecord;
+  document?: DocumentRecord | null;
+  source?: SourceRecord | null;
+  chunk?: {
+    chunkId: string;
+    sourceId?: string;
+    documentId?: string | null;
+    heading?: string;
+    content: string;
+    rank?: number;
+  };
 }
 
-// Project stats
+// =========================================================================
+// Project Stats
+// =========================================================================
 export interface ProjectStatsRecord {
-  document_count: number;
-  chunk_count: number;
-  event_count: number;
-  entity_count: number;
+  documentCount: number;
+  chunkCount: number;
+  eventCount: number;
+  entityCount: number;
 }
 
-// Graph
+// =========================================================================
+// Knowledge Graph
+// =========================================================================
+export interface ProjectGraphEntityRecord {
+  id: string;
+  sourceId: string;
+  type: string;
+  name: string;
+  normalizedName?: string;
+  eventCount: number;
+}
+
+export interface ProjectGraphEventRecord {
+  id: string;
+  sourceId: string;
+  documentId?: string | null;
+  title: string;
+  rank: number;
+  entityIds: string[];
+}
+
 export interface ProjectGraphRecord {
-  nodes: GraphNode[];
-  edges: GraphEdge[];
+  entities: ProjectGraphEntityRecord[];
+  events: ProjectGraphEventRecord[];
+  edges: Array<{ entityId: string; eventId: string }>;
 }
 
-export interface GraphNode {
-  id: string;
-  type: "entity" | "event";
-  label: string;
-  entityType?: string;
-  color?: string;
-}
-
-export interface GraphEdge {
-  id: string;
-  source: string;
-  target: string;
-  weight?: number;
-}
-
+// =========================================================================
 // Upload
+// =========================================================================
+export type UploadJobStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
+
+export type UploadJobStage =
+  | "QUEUED"
+  | "READING"
+  | "PARSING"
+  | "CHUNKING"
+  | "EMBEDDING_CHUNKS"
+  | "EXTRACTING_EVENTS"
+  | "EMBEDDING_EVENTS"
+  | "WRITING_GRAPH"
+  | "COMPLETED"
+  | "FAILED";
+
 export interface UploadJobRecord {
-  job_id: string;
-  status: string;
-  progress: string;
-  result?: UploadResult | null;
-  error?: string | null;
+  id: string;
+  sourceId: string;
+  fileName: string;
+  title: string;
+  status: UploadJobStatus;
+  stage: UploadJobStage;
+  message: string;
+  progress: number; // 0–100
+  chunkCount?: number;
+  eventCount?: number;
+  currentChunk?: number;
+  totalChunks?: number;
+  documentId?: string;
+  traceId?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface UploadResult {
@@ -115,7 +194,9 @@ export interface UploadResult {
   markdown_saved: boolean;
 }
 
-// Markdown files
+// =========================================================================
+// Markdown Files
+// =========================================================================
 export interface ImportRecord {
   project_id: string;
   project_name: string | null;
@@ -136,94 +217,204 @@ export interface MdFileInfo {
   imports: ImportRecord[];
 }
 
+// =========================================================================
 // Search
+// =========================================================================
 export type SearchMode = "fast" | "standard";
 export type ChunkingMode = "heading_strict" | "token";
 
+export interface SearchResultSection {
+  chunkId: string;
+  sourceId: string;
+  documentId?: string;
+  heading?: string;
+  content: string;
+  rank: number;
+  score: number;
+}
+
 export interface SearchResult {
-  events: EventRecord[];
-  trace?: SearchTraceStep[];
+  traceId: string;
+  sections: SearchResultSection[];
+  trace?: Record<string, unknown>;
 }
 
-export interface SearchTraceStep {
-  step: string;
+export interface SearchProgressEvent {
+  type: "step";
   status: "running" | "done" | "failed";
-  duration_ms?: number;
-  data?: any;
+  key: string;
+  title: string;
+  detail: string;
+  payload?: unknown;
+  durationMs?: number;
 }
 
-export interface SearchStreamEvent {
-  type: "step_start" | "step_end" | "result" | "error" | "done";
-  step?: string;
-  data?: any;
+export type SearchStreamEvent =
+  | SearchProgressEvent
+  | { type: "done"; result: SearchResult }
+  | { type: "error"; message: string };
+
+// =========================================================================
+// Model Call Logs
+// =========================================================================
+export interface ModelCallLogRecord {
+  sequence: number;
+  id: string;
+  kind: "llm" | "embedding";
+  operation: string;
+  status: "SUCCEEDED" | "FAILED";
+  createdAt: string;
+  durationMs: number;
+  request: unknown;
+  response?: unknown;
+  error?: string;
 }
 
-// MCP
+// =========================================================================
+// MCP Sessions
+// =========================================================================
 export interface McpSessionRecord {
   id: string;
+  tenantId?: string;
   title: string;
-  source_ids?: string[];
-  created_at: string;
+  status?: string;
+  model?: string | null;
+  sourceIds: string[];
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface McpMessageRecord {
+  id: string;
+  sessionId: string;
+  role: "user" | "assistant" | "tool" | "system";
+  content: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface McpToolCallRecord {
+  id: string;
+  sessionId: string;
+  messageId?: string | null;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  result?: unknown;
+  status: "PENDING" | "SUCCEEDED" | "FAILED";
+  durationMs?: number | null;
+  error?: string | null;
+  createdAt: string;
 }
 
 export interface McpSessionDetail {
   session: McpSessionRecord;
-  messages: McpMessage[];
-  tool_calls: McpToolCall[];
+  messages: McpMessageRecord[];
+  toolCalls: McpToolCallRecord[];
 }
 
-export interface McpMessage {
-  id: string;
-  role: "user" | "assistant" | "tool";
-  content: string;
-  created_at: string;
-}
+export type McpStreamEvent =
+  | { type: "stage"; label: string; detail?: string }
+  | { type: "message"; message: McpMessageRecord }
+  | { type: "assistant_delta"; delta: string }
+  | { type: "tool_start"; toolName: string; arguments: Record<string, unknown> }
+  | { type: "search_progress"; event: SearchProgressEvent }
+  | { type: "tool_end"; toolCall: McpToolCallRecord }
+  | { type: "done"; detail: McpSessionDetail }
+  | { type: "error"; message: string };
 
-export interface McpToolCall {
-  id: string;
-  tool_name: string;
-  arguments: any;
-  result?: string;
-  status: string;
-}
-
-export interface McpStreamEvent {
-  type: "stage" | "message" | "assistant_delta" | "tool_start" | "search_progress" | "tool_end" | "done" | "error";
-  data?: any;
-}
-
+// =========================================================================
 // Settings
+// =========================================================================
 export interface PublicAiProviderSettings {
-  embedding_base_url: string;
-  embedding_model: string;
-  embedding_dimensions: number;
-  embedding_api_key_configured: boolean;
-  llm_base_url: string;
-  llm_model: string;
-  llm_api_key_configured: boolean;
-  llm_timeout_ms: number;
-  llm_max_retries: number;
-  default_search_mode: SearchMode;
-  default_search_top_k: number;
-  default_chunking_mode: ChunkingMode;
-  chunk_token_limit: number;
-  chunk_overlap_tokens: number;
+  id?: "global";
+  embeddingBaseUrl: string;
+  embeddingModel: string;
+  embeddingDimensions: number;
+  hasEmbeddingApiKey: boolean;
+  llmBaseUrl: string;
+  llmModel: string;
+  hasLlmApiKey: boolean;
+  llmTimeoutMs: number;
+  llmMaxRetries: number;
+  defaultSearchMode: SearchMode;
+  defaultSearchTopK: number;
+  defaultChunkingMode: ChunkingMode;
+  chunkTokenLimit: number;
+  chunkOverlapTokens: number;
+  updatedAt?: string;
 }
 
 export interface PublicMcpSettings {
+  toolTimeoutMs?: number;
+  clientConfigs?: Array<{
+    id: string;
+    title: string;
+    description: string;
+    config: Record<string, unknown>;
+  }>;
   tools: McpToolInfo[];
-  sag_mcp_source_id?: string;
 }
 
 export interface McpToolInfo {
   name: string;
   description: string;
-  schema: any;
-  example?: any;
+  inputSchema?: Record<string, unknown>;
+  example?: Record<string, unknown>;
 }
 
-// Format info
+// =========================================================================
+// Format Info
+// =========================================================================
 export interface FormatsInfo {
   formats: string[];
   max_upload_size_mb: number | null;
 }
+
+// =========================================================================
+// Answer Citation (extracted from message metadata)
+// =========================================================================
+export interface AnswerCitation {
+  index: number;
+  chunkId: string;
+  sourceId: string;
+  documentId?: string;
+  heading?: string;
+  content: string;
+  rank?: number;
+  score?: number;
+  query?: string;
+}
+
+// =========================================================================
+// Process Step (for Activity Panel trace display)
+// =========================================================================
+export type ProcessStepStatus = "running" | "done" | "failed";
+
+export interface ProcessStep {
+  id: string;
+  title: string;
+  detail?: string;
+  status: ProcessStepStatus;
+  payload?: unknown;
+  durationMs?: number | null;
+}
+
+// =========================================================================
+// Running MCP Search (displayed in chat during tool execution)
+// =========================================================================
+export interface RunningMcpSearch {
+  id: string;
+  toolName: string;
+  query: string;
+  searchMode?: string;
+}
+
+// =========================================================================
+// Detail Drawer
+// =========================================================================
+export type DetailDrawer =
+  | { type: "event"; detail: EventDetailRecord }
+  | { type: "entity"; detail: EntityDetailRecord }
+  | { type: "citation"; citation: AnswerCitation }
+  | null;

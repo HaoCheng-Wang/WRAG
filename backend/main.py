@@ -174,6 +174,23 @@ def _stop_mcp():
     print("[WRAG] MCP HTTP bridge stopped.")
 
 
+def _restart_mcp(new_source_id: str) -> bool:
+    """Restart MCP bridge bound to a different project.
+
+    Stops the current bridge (if any), updates settings.mcp_source_id,
+    and starts a new one. Returns True on success.
+    """
+    global _mcp_process
+    _stop_mcp()
+    settings.mcp_source_id = new_source_id  # type: ignore[assignment]
+    _mcp_process = _start_mcp_http_server()
+    if _mcp_process is not None:
+        print(f"[WRAG] MCP HTTP bridge restarted — now bound to project: {new_source_id}")
+        return True
+    print("[WRAG] Failed to restart MCP HTTP bridge")
+    return False
+
+
 async def _health_poll_sag(max_retries: int = 60, interval: float = 2.0) -> bool:
     """Poll SAG /health until it responds 200 (async, cancellable).
 
@@ -323,16 +340,33 @@ async def startup():
         _sag_process = _start_sag()
         await _health_poll_sag()
 
-    # 4. Start MCP HTTP bridge (optional — requires mcp_source_id to be set)
+    # 4. Start MCP HTTP bridge — auto-discover project if not configured
+    if not settings.mcp_source_id:
+        try:
+            import json as _json
+            sag_projects_url = f"{settings.sag_api_url}/api/projects"
+            resp = await asyncio.to_thread(urllib.request.urlopen, sag_projects_url, None, 5.0)
+            projects_data = _json.loads(resp.read().decode())
+            first_project = (projects_data.get("projects") or [None])[0]
+            if first_project:
+                settings.mcp_source_id = first_project["id"]
+                print(f"[WRAG] Auto-configured MCP source_id from first project: {first_project.get('name', settings.mcp_source_id)}")
+            else:
+                print("[WRAG] No projects found in SAG — MCP bridge will not start. Create a project and restart.")
+        except Exception as e:
+            print(f"[WRAG] Could not auto-discover project for MCP bridge: {e}")
+
     if settings.mcp_source_id:
         _mcp_process = _start_mcp_http_server()
-        print(f"[WRAG] MCP HTTP bridge started (source_id: {settings.mcp_source_id})")
+        print(f"[WRAG] MCP HTTP bridge started on port 4174 (source_id: {settings.mcp_source_id})")
+    else:
+        print("[WRAG] MCP HTTP bridge not started — no project available. Create a project first, then restart.")
 
     # 5. Create SagClient
     _sag_client = SagClient(settings.sag_api_url)
 
     # 5. Wire up router dependencies
-    init_router(md_store, _sag_client)
+    init_router(md_store, _sag_client, _restart_mcp)
 
     print("[WRAG] ========================================")
     print(f"[WRAG]  WRAG ready at http://{settings.wrag_host}:{settings.wrag_port}")

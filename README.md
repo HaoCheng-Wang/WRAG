@@ -10,10 +10,10 @@
 
 - **Multi-format upload**: PDF, DOCX, PPTX, XLSX, CSV, HTML, EPUB, images, audio, ZIP, Jupyter notebooks, and more — all formats supported by MarkItDown
 - **Markdown persistence**: Converted `.md` files are saved and can be viewed, edited, downloaded, or re-imported into different projects
-- **Knowledge graph**: Interactive force-directed graph visualization of extracted entities and events
-- **Conversational RAG**: Chat interface with MCP-powered retrieval, streaming responses, and citation support
-- **MCP Agent Integration**: Built-in MCP HTTP bridge — connect Claude Desktop, Cursor, or any MCP-compatible AI client
-- **Modern UI**: Ant Design 5 based interface with Chinese/English i18n
+- **Knowledge graph**: Interactive force-directed graph visualization of extracted entities and events with double-click detail inspection
+- **Conversational RAG**: Chat interface with MCP-powered retrieval, markdown rendering, streaming responses, and citation support
+- **MCP Agent Integration**: Built-in MCP HTTP bridge — auto-discovers projects, binds dynamically, connects to Claude Desktop, Cursor, or any MCP-compatible AI client
+- **Modern UI**: Ant Design 5 based interface with Chinese/English i18n (auto-detect)
 - **Independent management**: Markdown files and KB content are independently managed — delete one without affecting the other
 - **Docker deployment**: Single container for production; includes MCP HTTP bridge for agent access
 
@@ -37,6 +37,7 @@
 │  WRAG Backend (FastAPI + Python, Port 8555)              │
 │    ├── POST /api/wrag/upload       → Upload + convert    │
 │    ├── /api/wrag/markdown/*        → Markdown management │
+│    ├── /api/wrag/mcp/bind          → Dynamic MCP binding │
 │    ├── /api/*                      → Proxy to SAG        │
 │    └── Frontend static files at /                       │
 │        │                                                 │
@@ -45,6 +46,7 @@
 │        │                                                 │
 │        ▼                                                 │
 │  MCP HTTP Bridge (Port 4174)                             │
+│    Auto-discovered & managed by WRAG backend             │
 │    Tools: sag_search, sag_ingest_document,               │
 │           sag_explain_search, sag_get_event              │
 └──────────────────────┬─────────────────────────────────┘
@@ -89,7 +91,7 @@ Then open **http://localhost:5174**
 3. Install npm dependencies for SAG and frontend
 4. Start PostgreSQL via Docker
 5. Initialize SAG database (migrations + seed)
-6. Start WRAG backend (auto-starts SAG API as subprocess)
+6. Start WRAG backend (auto-starts SAG API + MCP HTTP bridge as subprocesses)
 7. Start WRAG frontend Vite dev server (port 5174)
 8. Remind about AI API key configuration if missing
 
@@ -101,52 +103,7 @@ Then open **http://localhost:5174**
 
 This builds a single Docker container with:
 - **Port 8555** — Frontend UI + REST API (both served by FastAPI)
-- **Port 4174** — MCP HTTP endpoint for AI agents
-
-The resulting directory layout:
-
-```
-WRAG/
-├── start.sh                # Dev one-click startup
-├── docker-start.sh         # Docker production startup
-├── docker-compose.yml      # PostgreSQL + WRAG services
-├── Dockerfile              # Multi-stage container build
-├── docker-entrypoint.sh    # Container startup script
-├── .env                    # WRAG config (auto-created)
-├── .env.example            # WRAG config template
-├── requirements.txt        # Python dependencies
-├── README.md / README-CN.md
-├── backend/
-│   ├── main.py              # FastAPI entry + lifecycle
-│   ├── config.py            # pydantic-settings config
-│   ├── router.py            # All API routes + SAG proxy
-│   ├── converter.py         # MarkItDown wrapper
-│   ├── sag_client.py        # SAG HTTP client
-│   ├── md_store.py          # SQLite + filesystem storage
-│   ├── models.py            # Pydantic models
-│   └── mcp-http-server.ts   # MCP HTTP bridge (Node.js)
-├── frontend/               # React SPA (Ant Design 5)
-├── markitdown/             # git clone from microsoft/markitdown
-├── SAG/                    # git clone from Zleap-AI/SAG
-│   └── .env                # SAG / AI config
-├── .venv/                   # Created by start.sh
-└── md_storage/              # Created at runtime — persisted .md files
-```
-
-> **💡 Without API keys, SAG runs in local fallback mode.** You can explore the UI, then configure keys later.
-
-### Configuring AI Features
-
-After the first run, edit the configuration files:
-
-| File | Purpose | Key variables |
-|------|---------|---------------|
-| `SAG/.env` | AI models & API keys | `EMBEDDING_API_KEY`, `LLM_API_KEY` |
-| `.env` | WRAG server settings | `WRAG_PORT`, `WRAG_MAX_UPLOAD_SIZE_MB`, `WRAG_MCP_SOURCE_ID` |
-
-Then restart: `./start.sh`
-
-> **Note:** `start.sh` performs a smart sync — new keys from `.env.example` are appended with a `[NEW]` marker. Existing settings are never overwritten.
+- **Port 4174** — MCP HTTP endpoint for AI agents (auto-bound to the first SAG project)
 
 ---
 
@@ -163,6 +120,16 @@ WRAG includes an MCP HTTP bridge that exposes SAG's knowledge base tools to AI c
 | `sag_explain_search` | Get detailed search trace and explanation |
 | `sag_get_event` | Retrieve a specific event by UUID |
 
+### Project Binding
+
+The MCP bridge **auto-discovers** the first SAG project at startup. To change which project is bound:
+
+1. Open the **MCP tab** in the WRAG frontend
+2. Use the dropdown to select a different project
+3. Click **"Switch Binding"** — the bridge restarts instantly
+
+Or set `WRAG_MCP_SOURCE_ID` in `.env` / `docker-compose.yml` to pin a specific project permanently.
+
 ### Connecting Claude Desktop
 
 Add to your `claude_desktop_config.json` (or `mcp.json`):
@@ -178,16 +145,7 @@ Add to your `claude_desktop_config.json` (or `mcp.json`):
 }
 ```
 
-### Enabling the MCP Bridge
-
-Set `WRAG_MCP_SOURCE_ID` in `.env` (dev mode) or `docker-compose.yml` (Docker mode) to a SAG project UUID:
-
-```env
-# In .env
-WRAG_MCP_SOURCE_ID=your-project-uuid-here
-```
-
-The project UUID is visible in the browser URL after creating a project on the WRAG frontend.
+> Replace `localhost` with the server address when accessing remotely.
 
 ---
 
@@ -202,7 +160,7 @@ The project UUID is visible in the browser URL after creating a project on the W
 | `SAG_API_URL` | `http://127.0.0.1:4173` | Internal SAG API address |
 | `MD_STORAGE_DIR` | `md_storage` | Markdown file storage directory |
 | `WRAG_MAX_UPLOAD_SIZE_MB` | *(blank)* | Max upload size in MB. Blank = no limit |
-| `WRAG_MCP_SOURCE_ID` | *(blank)* | SAG project UUID for MCP HTTP bridge |
+| `WRAG_MCP_SOURCE_ID` | *(auto)* | Pin MCP bridge to a specific project UUID. Leave blank for auto-discovery |
 
 > **Note:** `DATABASE_URL` is configured in `SAG/.env` only. WRAG uses SQLite for its own metadata and does not need PostgreSQL credentials.
 
@@ -249,6 +207,8 @@ The project UUID is visible in the browser URL after creating a project on the W
 | `GET` | `/api/formats` | List supported file formats |
 | `POST` | `/api/wrag/upload` | Upload file → convert → ingest |
 | `POST` | `/api/wrag/upload/stream` | Upload with SSE progress streaming |
+| `GET` | `/api/wrag/mcp/binding` | Get current MCP bridge project binding |
+| `POST` | `/api/wrag/mcp/bind` | Switch MCP bridge to a different project |
 
 ### Markdown file management
 
@@ -283,8 +243,9 @@ All `/api/*` endpoints are transparently proxied to SAG. See [SAG documentation]
 5. **Ant Design**: Distinct UI from SAG's Tailwind; rich Chinese-friendly component library.
 6. **Proxy all SAG APIs**: Frontend communicates only with WRAG backend on port 8555. SAG's own frontend is not started — WRAG replaces it entirely.
 7. **MCP HTTP Bridge**: Thin Node.js wrapper imports SAG's `buildMcpServer()` and wraps it with `StreamableHTTPServerTransport` — zero modification to SAG source code.
-8. **Single container for production**: WRAG Docker image bundles the frontend (built static files), backend, SAG API, and MCP bridge — expose ports 8555 (UI+API) and 4174 (MCP).
-9. **SQLite for WRAG metadata**: PostgreSQL is SAG's concern. WRAG uses SQLite for markdown file tracking, keeping responsibilities cleanly separated.
+8. **Auto-discovery + dynamic binding**: MCP bridge auto-binds to the first project. Users can switch binding on-the-fly from the frontend MCP tab without editing config files or restarting the container.
+9. **Single container for production**: WRAG Docker image bundles the frontend (built static files), backend, SAG API, and MCP bridge — expose ports 8555 (UI+API) and 4174 (MCP).
+10. **SQLite for WRAG metadata**: PostgreSQL is SAG's concern. WRAG uses SQLite for markdown file tracking, keeping responsibilities cleanly separated.
 
 ---
 

@@ -9,7 +9,7 @@
  *
  * Usage:
  *   cd SAG
- *   SAG_MCP_SOURCE_ID=<uuid> DATABASE_URL=... npx tsx ../backend/mcp-http-server.ts
+ *   SAG_MCP_SOURCE_ID=<uuid> DATABASE_URL=... node --import tsx/esm ../backend/mcp-http-server.ts
  *
  * AI Client Config (Claude Desktop):
  *   { "mcpServers": { "wrag": { "type": "http", "url": "http://host:4174/mcp" } } }
@@ -27,8 +27,7 @@ const HOST = process.env.MCP_HOST || "0.0.0.0";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAG_DIR = resolve(__dirname, "..", "SAG");
 
-// Load SAG's buildMcpServer — use .ts extension since SAG has no .js build output.
-// tsx handles the .ts → runtime mapping for dynamic import().
+// Load SAG's buildMcpServer — tsx handles the .ts → runtime mapping
 const { buildMcpServer } = await import(
   resolve(__dirname, "..", "SAG", "src", "mcp", "server.ts")
 );
@@ -54,7 +53,7 @@ const { StreamableHTTPServerTransport } = sagRequire(
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers",
-      "Content-Type, Authorization, MCP-Protocol-Version");
+      "Content-Type, Authorization, MCP-Protocol-Version, mcp-session-id");
 
     if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 

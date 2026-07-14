@@ -41,7 +41,7 @@ export default function ImportToProjectModal({ open, projects, onClose, onSucces
     }
   };
 
-  const activeProjects = projects.filter((p) => !p.archived_at);
+  const activeProjects = projects.filter((p) => !p.archivedAt);
 
   return (
     <Modal

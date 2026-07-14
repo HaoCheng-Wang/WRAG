@@ -10,12 +10,12 @@
 
 - **多格式上传**：支持 PDF、DOCX、PPTX、XLSX、CSV、HTML、EPUB、图片、音频、ZIP、Jupyter Notebook 等 MarkItDown 支持的全部格式
 - **Markdown 持久化**：转换后的 `.md` 文件可预览、在线编辑、下载、导入到不同项目
-- **知识图谱**：基于 ReactFlow 的交互式力导向图，可视化实体与事件的关联
-- **对话式 RAG**：MCP 驱动的聊天界面，支持 SSE 流式响应和引用标记
-- **MCP 智能体接入**：内置 MCP HTTP 桥接器 — 可连接 Claude Desktop、Cursor 等任何兼容 MCP 协议的 AI 客户端
-- **现代化 UI**：基于 Ant Design 5，支持中英文双语切换
+- **知识图谱**：基于 ReactFlow 的交互式力导向图，实体与事件节点可双击查看详情
+- **对话式 RAG**：MCP 驱动的聊天界面，支持 Markdown 渲染（表格/代码块/引用链接）、SSE 流式响应和引用标记
+- **MCP 智能体接入**：内置 MCP HTTP 桥接器 — 自动发现项目、动态切换绑定，可连接 Claude Desktop、Cursor 等任何兼容 MCP 协议的 AI 客户端
+- **现代化 UI**：基于 Ant Design 5，中/英/自动三档语言切换
 - **独立管理**：Markdown 文件与知识库内容独立管理，互不影响
-- **Docker 部署**：生产环境一键容器化，包含 MCP HTTP 桥接器
+- **Docker 部署**：生产环境单容器一键部署，含 MCP HTTP 桥接器
 
 ---
 
@@ -37,6 +37,7 @@
 │  WRAG 后端 (FastAPI + Python, 端口 8555)                  │
 │    ├── POST /api/wrag/upload       → 上传 + 格式转换      │
 │    ├── /api/wrag/markdown/*        → Markdown 文件管理    │
+│    ├── /api/wrag/mcp/bind          → 动态 MCP 项目绑定    │
 │    ├── /api/*                      → 反向代理到 SAG       │
 │    └── 前端静态文件 at /                                 │
 │        │                                                 │
@@ -45,6 +46,7 @@
 │        │                                                 │
 │        ▼                                                 │
 │  MCP HTTP 桥接器 (端口 4174)                             │
+│    由 WRAG 后端自动发现项目并管理                          │
 │    工具: sag_search, sag_ingest_document,                │
 │          sag_explain_search, sag_get_event               │
 └──────────────────────┬─────────────────────────────────┘
@@ -89,7 +91,7 @@ git clone https://github.com/Zleap-AI/SAG.git
 3. 安装 SAG 和前端 npm 依赖
 4. Docker 启动 PostgreSQL
 5. 初始化 SAG 数据库（迁移 + 种子数据）
-6. 启动 WRAG 后端（自动拉起 SAG API 子进程）
+6. 启动 WRAG 后端（自动拉起 SAG API + MCP HTTP 桥子进程）
 7. 启动 WRAG 前端 Vite 开发服务器（端口 5174）
 8. 提示 AI API key 配置状态
 
@@ -101,52 +103,7 @@ git clone https://github.com/Zleap-AI/SAG.git
 
 构建单个 Docker 容器，对外暴露：
 - **端口 8555** — 前端 UI + REST API（均由 FastAPI 提供）
-- **端口 4174** — MCP HTTP 端点（供 AI 智能体连接）
-
-最终的目录结构：
-
-```
-WRAG/
-├── start.sh                # 开发一键启动
-├── docker-start.sh         # Docker 生产启动
-├── docker-compose.yml      # PostgreSQL + WRAG 服务编排
-├── Dockerfile              # 多阶段容器构建
-├── docker-entrypoint.sh    # 容器启动脚本
-├── .env                    # WRAG 配置（自动创建）
-├── .env.example            # WRAG 配置模板
-├── requirements.txt        # Python 依赖
-├── README.md / README-CN.md
-├── backend/
-│   ├── main.py              # FastAPI 入口 + 生命周期管理
-│   ├── config.py            # pydantic-settings 配置
-│   ├── router.py            # API 路由 + SAG 代理
-│   ├── converter.py         # MarkItDown 封装
-│   ├── sag_client.py        # SAG HTTP 客户端
-│   ├── md_store.py          # SQLite + 文件系统存储
-│   ├── models.py            # Pydantic 数据模型
-│   └── mcp-http-server.ts   # MCP HTTP 桥接器 (Node.js)
-├── frontend/               # React 前端 (Ant Design 5)
-├── markitdown/             # git clone from microsoft/markitdown
-├── SAG/                    # git clone from Zleap-AI/SAG
-│   └── .env                # SAG / AI 配置
-├── .venv/                   # 由 start.sh 创建
-└── md_storage/              # 运行时创建 — 持久化 .md 文件
-```
-
-> **💡 未配置 API key 时，SAG 以本地回退模式运行。** 你可以先浏览 UI 功能，之后再配置 AI 密钥。
-
-### 配置 AI 功能
-
-首次运行后，编辑配置文件以启用完整的 AI 检索功能：
-
-| 文件 | 用途 | 需设置的关键变量 |
-|------|------|-----------------|
-| `SAG/.env` | AI 模型与 API 密钥 | `EMBEDDING_API_KEY`、`LLM_API_KEY` |
-| `.env` | WRAG 服务器设置 | `WRAG_PORT`、`WRAG_MAX_UPLOAD_SIZE_MB`、`WRAG_MCP_SOURCE_ID` |
-
-修改后重启：`./start.sh`
-
-> **注意：** `start.sh` 执行智能同步 — 如果升级后 `.env.example` 新增了变量，会自动追加到你的 `.env` 中并标记 `[NEW]`，已有配置不会被覆盖。
+- **端口 4174** — MCP HTTP 端点（自动绑定到第一个 SAG 项目）
 
 ---
 
@@ -163,6 +120,16 @@ WRAG 内置 MCP HTTP 桥接器，通过标准 [Model Context Protocol](https://m
 | `sag_explain_search` | 获取搜索 trace 和详细解释 |
 | `sag_get_event` | 按 UUID 获取单个事件详情 |
 
+### 项目绑定
+
+MCP 桥接器**启动时自动发现**第一个 SAG 项目并绑定。要切换绑定的项目：
+
+1. 在 WRAG 前端打开 **MCP 标签页**
+2. 用下拉菜单选择不同项目
+3. 点击 **"切换绑定"** — 桥接器即时重启
+
+也可以在 `.env` 或 `docker-compose.yml` 中设置 `WRAG_MCP_SOURCE_ID` 固定绑定。
+
 ### 连接 Claude Desktop
 
 在 `claude_desktop_config.json`（或 `mcp.json`）中添加：
@@ -178,16 +145,7 @@ WRAG 内置 MCP HTTP 桥接器，通过标准 [Model Context Protocol](https://m
 }
 ```
 
-### 启用 MCP 桥接器
-
-在 `.env`（开发模式）或 `docker-compose.yml`（Docker 模式）中设置 `WRAG_MCP_SOURCE_ID`：
-
-```env
-# 在 .env 中
-WRAG_MCP_SOURCE_ID=your-project-uuid-here
-```
-
-项目 UUID 可在前端创建项目后从浏览器地址栏 URL 中获取。
+> 远程访问时请将 `localhost` 替换为服务器地址。
 
 ---
 
@@ -202,7 +160,7 @@ WRAG_MCP_SOURCE_ID=your-project-uuid-here
 | `SAG_API_URL` | `http://127.0.0.1:4173` | SAG API 内部地址 |
 | `MD_STORAGE_DIR` | `md_storage` | Markdown 文件存储目录 |
 | `WRAG_MAX_UPLOAD_SIZE_MB` | *(空)* | 上传文件大小上限（MB）。留空 = 不限制 |
-| `WRAG_MCP_SOURCE_ID` | *(空)* | MCP HTTP 桥接器绑定的 SAG 项目 UUID |
+| `WRAG_MCP_SOURCE_ID` | *(自动)* | 固定 MCP 桥绑定的项目 UUID。留空则自动发现第一个项目 |
 
 > **注意：** `DATABASE_URL` 只在 `SAG/.env` 中配置。WRAG 使用 SQLite 管理自身元数据，不需要 PostgreSQL 连接信息。
 
@@ -249,6 +207,8 @@ WRAG_MCP_SOURCE_ID=your-project-uuid-here
 | `GET` | `/api/formats` | 列出支持的文件格式 |
 | `POST` | `/api/wrag/upload` | 上传文件 → 转换 → 入库 |
 | `POST` | `/api/wrag/upload/stream` | 上传 + SSE 流式进度推送 |
+| `GET` | `/api/wrag/mcp/binding` | 查询当前 MCP 桥绑定的项目 |
+| `POST` | `/api/wrag/mcp/bind` | 切换 MCP 桥绑定到其他项目 |
 
 ### Markdown 文件管理
 
@@ -283,8 +243,9 @@ WRAG_MCP_SOURCE_ID=your-project-uuid-here
 5. **Ant Design**：与 SAG 的 Tailwind 风格明显区隔，提供完整的中文友好组件库。
 6. **代理全部 SAG API**：前端仅与 WRAG 后端（端口 8555）通信，SAG 自带前端不启动 — 完全由 WRAG 前端替代。
 7. **MCP HTTP 桥接器**：薄的 Node.js 包装层，导入 SAG 的 `buildMcpServer()` 并用 `StreamableHTTPServerTransport` 暴露为 HTTP 端点 — 不修改 SAG 一行源码。
-8. **生产环境单容器**：WRAG Docker 镜像整合前端（构建后的静态文件）、后端、SAG API 和 MCP 桥接器 — 对外暴露 8555（UI+API）和 4174（MCP）。
-9. **SQLite 管理 WRAG 元数据**：PostgreSQL 是 SAG 的职责。WRAG 用 SQLite 追踪 Markdown 文件，职责清晰分离。
+8. **自动发现 + 动态绑定**：MCP 桥自动绑定到第一个项目。用户可在前端 MCP 页面随时动态切换，无需改配置文件或重启容器。
+9. **生产环境单容器**：WRAG Docker 镜像整合前端（构建后的静态文件）、后端、SAG API 和 MCP 桥接器 — 对外暴露 8555（UI+API）和 4174（MCP）。
+10. **SQLite 管理 WRAG 元数据**：PostgreSQL 是 SAG 的职责。WRAG 用 SQLite 追踪 Markdown 文件，职责清晰分离。
 
 ---
 

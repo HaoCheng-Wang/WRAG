@@ -6,9 +6,11 @@ import os
 import tempfile
 import asyncio
 from pathlib import Path
+from typing import Callable
 
 from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException, Query
 from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
+from pydantic import BaseModel
 
 from .config import settings
 from .converter import convert_to_markdown
@@ -36,6 +38,7 @@ router = APIRouter()
 
 _md_store: MdStore | None = None
 _sag_client: SagClient | None = None
+_restart_mcp_fn: Callable[[str], bool] | None = None
 
 
 def get_md_store() -> MdStore:
@@ -48,10 +51,11 @@ def get_sag_client() -> SagClient:
     return _sag_client
 
 
-def init_router(md_store: MdStore, sag_client: SagClient) -> None:
-    global _md_store, _sag_client
+def init_router(md_store: MdStore, sag_client: SagClient, restart_mcp_fn: Callable[[str], bool] | None = None) -> None:
+    global _md_store, _sag_client, _restart_mcp_fn
     _md_store = md_store
     _sag_client = sag_client
+    _restart_mcp_fn = restart_mcp_fn
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +406,47 @@ async def import_md_file(file_id: str, body: ImportRequest):
         document_id=result.get("documentId", ""),
         project_id=body.project_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# MCP project binding
+# ---------------------------------------------------------------------------
+
+class McpBindRequest(BaseModel):
+    project_id: str
+
+
+@router.get("/api/wrag/mcp/binding")
+async def get_mcp_binding():
+    """Get the current MCP bridge project binding."""
+    return JSONResponse({
+        "project_id": settings.mcp_source_id,
+        "mcp_enabled": settings.mcp_source_id is not None,
+    })
+
+
+@router.post("/api/wrag/mcp/bind")
+async def bind_mcp_project(body: McpBindRequest):
+    """Switch the MCP bridge to bind to a different project.
+
+    Restarts the MCP HTTP bridge subprocess with the new project ID.
+    Active MCP sessions will be terminated.
+    """
+    if _restart_mcp_fn is None:
+        raise HTTPException(500, "MCP bridge management not available")
+
+    project_id = body.project_id.strip()
+    if not project_id:
+        raise HTTPException(400, "project_id is required")
+
+    success = _restart_mcp_fn(project_id)
+    if not success:
+        raise HTTPException(500, "Failed to restart MCP bridge")
+
+    return JSONResponse({
+        "project_id": settings.mcp_source_id,
+        "message": "MCP bridge restarted with new project binding",
+    })
 
 
 # ---------------------------------------------------------------------------

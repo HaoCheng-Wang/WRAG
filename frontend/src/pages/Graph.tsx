@@ -1,7 +1,13 @@
-/** Graph page — interactive knowledge graph with ReactFlow. */
+/** Graph page — interactive knowledge graph with ReactFlow.
+ *
+ *  Matches SAG's ProjectGraphWorkspace:
+ *  - Entity nodes colored by type, event nodes
+ *  - Double-click to fetch and open event/entity detail
+ *  - Controls, minimap, background
+ */
 
 import { useState, useEffect, useCallback } from "react";
-import { Empty, Spin, FloatButton, Tag, Drawer, Descriptions } from "antd";
+import { Empty, Spin, FloatButton } from "antd";
 import { ZoomInOutlined, ZoomOutOutlined, ExpandOutlined } from "@ant-design/icons";
 import {
   ReactFlow, Controls, Background, MiniMap, useNodesState, useEdgesState,
@@ -9,6 +15,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api } from "../lib/api";
+import type { ProjectGraphRecord } from "../types";
 
 const ENTITY_COLORS: Record<string, string> = {
   person: "#ff7eb6", organization: "#7ec8e3", location: "#8ae08a",
@@ -17,36 +24,55 @@ const ENTITY_COLORS: Record<string, string> = {
   subject: "#f9a8d4", tags: "#cbd5e1",
 };
 
-function buildFlowData(graph: any): { nodes: Node[]; edges: Edge[] } {
+function buildFlowData(graph: ProjectGraphRecord): { nodes: Node[]; edges: Edge[] } {
   if (!graph) return { nodes: [], edges: [] };
-  const nodes: Node[] = (graph.nodes ?? []).map((n: any) => ({
-    id: n.id,
-    type: "default",
-    data: { label: n.label, entityType: n.entityType },
-    position: {
-      x: Math.random() * 600,
-      y: Math.random() * 400,
-    },
-    style: n.type === "entity"
-      ? { background: ENTITY_COLORS[n.entityType ?? ""] ?? "#eee", borderRadius: 8, padding: 8, fontSize: 12 }
-      : { background: "#fff", border: "2px solid #1677ff", borderRadius: 4, padding: 8, fontSize: 12 },
+
+  const entityMap = new Map(graph.entities.map((e) => [e.id, e]));
+
+  const nodes: Node[] = [
+    ...graph.entities.map((e) => ({
+      id: e.id,
+      type: "default" as const,
+      data: { label: e.name, entityType: e.type, kind: "entity" },
+      position: { x: Math.random() * 600, y: Math.random() * 400 },
+      style: {
+        background: ENTITY_COLORS[e.type] ?? "#eee",
+        borderRadius: 20, padding: "6px 12px", fontSize: 12, fontWeight: 500,
+      },
+    })),
+    ...graph.events.map((ev) => ({
+      id: ev.id,
+      type: "default" as const,
+      data: { label: ev.title, kind: "event", entityIds: ev.entityIds },
+      position: { x: Math.random() * 600, y: Math.random() * 400 },
+      style: {
+        background: "#fff", border: "2px solid #1677ff", borderRadius: 4,
+        padding: "6px 12px", fontSize: 12,
+      },
+    })),
+  ];
+
+  const edges: Edge[] = (graph.edges ?? []).map((e) => ({
+    id: `${e.entityId}-${e.eventId}`,
+    source: e.entityId,
+    target: e.eventId,
+    style: { stroke: "#d9d9d9" },
   }));
-  const edges: Edge[] = (graph.edges ?? []).map((e: any) => ({
-    id: e.id, source: e.source, target: e.target,
-  }));
+
   return { nodes, edges };
 }
 
 interface Props {
   projectId: string;
+  onOpenEventDetail?: (eventId: string) => void;
+  onOpenEntityDetail?: (entityId: string) => void;
   t: (zh: string, en: string) => string;
 }
 
-export default function Graph({ projectId, t }: Props) {
+export default function Graph({ projectId, onOpenEventDetail, onOpenEntityDetail, t }: Props) {
   const [loading, setLoading] = useState(true);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [detailOpen, setDetailOpen] = useState(false);
 
   useEffect(() => {
     if (!projectId) return;
@@ -62,12 +88,23 @@ export default function Graph({ projectId, t }: Props) {
   }, [projectId, setNodes, setEdges]);
 
   const onNodeDoubleClick = useCallback(async (_event: any, node: Node) => {
-    // Could fetch event/entity detail here
-    setDetailOpen(true);
-  }, []);
+    const kind = node.data?.kind as string;
+    const id = node.id;
+    if (kind === "event" && onOpenEventDetail) {
+      onOpenEventDetail(id);
+    } else if (kind === "entity" && onOpenEntityDetail) {
+      onOpenEntityDetail(id);
+    }
+  }, [onOpenEventDetail, onOpenEntityDetail]);
 
   if (loading) return <div style={{ textAlign: "center", padding: 40 }}><Spin /></div>;
-  if (nodes.length === 0) return <Empty description={t("暂无图谱数据", "No graph data")} style={{ marginTop: 120 }} />;
+  if (nodes.length === 0) {
+    return (
+      <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100%" }}>
+        <Empty description={t("暂无图谱数据，上传文档并完成提取后可查看", "No graph data yet. Upload documents and finish extraction.")} />
+      </div>
+    );
+  }
 
   return (
     <div style={{ width: "100%", height: "calc(100vh - 48px)" }}>
@@ -78,6 +115,7 @@ export default function Graph({ projectId, t }: Props) {
         onEdgesChange={onEdgesChange}
         onNodeDoubleClick={onNodeDoubleClick}
         fitView
+        attributionPosition="bottom-left"
       >
         <Controls />
         <Background />
@@ -87,19 +125,6 @@ export default function Graph({ projectId, t }: Props) {
         <FloatButton icon={<ZoomInOutlined />} />
         <FloatButton icon={<ExpandOutlined />} />
       </FloatButton.Group>
-
-      <Drawer
-        open={detailOpen}
-        onClose={() => setDetailOpen(false)}
-        title={t("节点详情", "Node Detail")}
-        width={400}
-      >
-        <Descriptions column={1} size="small">
-          <Descriptions.Item label={t("双击节点查看详情", "Double-click node for details")}>
-            {t("功能开发中", "Feature in development")}
-          </Descriptions.Item>
-        </Descriptions>
-      </Drawer>
     </div>
   );
 }
