@@ -251,16 +251,49 @@ async def upload_file_stream(
             else:
                 file_id = None
 
-            # Step 3: ingesting
+            # Step 3: ingesting — use async upload job with polling
             yield _send("ingesting", '{"stage":"ingesting"}')
             sag = get_sag_client()
-            result = await sag.upload_document(
+            import json as _json
+
+            # Create async upload job (non-blocking)
+            job = await sag.create_upload_job(
                 project_id=project_id,
                 title=doc_title,
                 content=markdown_content,
                 file_name=f"{doc_title}.md",
             )
-            yield _send("ingested", f'{{"stage":"ingested","document_id":"{result.get("documentId","")}"}}')
+            job_id = job["id"]
+
+            result = {}
+            while True:
+                # Check for client disconnect (cancel button)
+                if await request.is_disconnected():
+                    # Job continues in SAG; we just stop streaming
+                    return
+
+                job_status = await sag.get_upload_job(job_id)
+                status = job_status.get("status", "")
+
+                yield _send("job_progress", _json.dumps({
+                    "job_id": job_id,
+                    "status": status,
+                    "stage": job_status.get("stage", ""),
+                    "progress": job_status.get("progress", 0),
+                    "message": job_status.get("message", ""),
+                    "chunkCount": job_status.get("chunkCount", 0),
+                    "eventCount": job_status.get("eventCount", 0),
+                }))
+
+                if status == "COMPLETED":
+                    result = {"documentId": job_status.get("documentId", "")}
+                    break
+                elif status == "FAILED":
+                    raise Exception(job_status.get("error") or job_status.get("message") or "Upload job failed")
+
+                await asyncio.sleep(2)
+
+            yield _send("ingested", _json.dumps({"stage": "ingested", "document_id": result.get("documentId", "")}))
 
             # Record import
             if file_id and save_markdown:
@@ -271,10 +304,10 @@ async def upload_file_stream(
                     document_id=result.get("documentId", ""),
                 )
 
-            yield _send("done", f'{{"stage":"done","file_id":"{file_id}","document_id":"{result.get("documentId","")}"}}')
+            yield _send("done", _json.dumps({"stage": "done", "file_id": file_id or "", "document_id": result.get("documentId", "")}))
 
         except Exception as e:
-            yield _send("error", f'{{"stage":"error","message":"{str(e)}"}}')
+            yield _send("error", _json.dumps({"stage": "error", "message": str(e)}))
         finally:
             try:
                 os.unlink(tmp_path)

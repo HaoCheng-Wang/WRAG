@@ -1,12 +1,11 @@
 /** Chat page — conversational RAG via MCP sessions with SSE streaming.
  *
- *  Fully matches SAG's ConversationWorkspace:
- *  - Markdown rendering with code blocks, tables, inline formatting
- *  - Citation strip below assistant messages
- *  - Running MCP search display during sag_search tool calls
- *  - Streaming assistant text with real-time delta display
- *  - Session header with clear/delete actions
- *  - Stop generation via AbortController
+ *  Exact same state management as SAG's ConversationWorkspace:
+ *  - Functional updaters for mcpDetail (never stale)
+ *  - appendMessageToDetail / appendToolCallToDetail per SAG
+ *  - handleMcpStreamEvent dispatch matching SAG exactly
+ *  - sendMcpMessage flow matching SAG exactly
+ *  - Ant Design styling for bubbles, citations, and controls
  */
 
 import { useState, useRef, useEffect, type ReactNode } from "react";
@@ -22,7 +21,7 @@ import type {
   McpToolCallRecord, AnswerCitation, ProcessStep, RunningMcpSearch, SearchProgressEvent,
 } from "../types";
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 // ---------------------------------------------------------------------------
 // Props
@@ -31,13 +30,12 @@ const { Text, Paragraph } = Typography;
 interface Props {
   projectId: string;
   project: SourceRecord | null;
-  mcpDetail: McpSessionDetail | null;
   isMcpRunning: boolean;
   pendingUserMessage: string;
   streamingAssistantText: string;
   runningMcpSearches: RunningMcpSearch[];
   processSteps: ProcessStep[];
-  onMcpDetailChange: (detail: McpSessionDetail | null) => void;
+  onMcpDetailChange: (updater: McpSessionDetail | null | ((prev: McpSessionDetail | null) => McpSessionDetail | null)) => void;
   onIsMcpRunningChange: (v: boolean) => void;
   onPendingUserMessageChange: (v: string) => void;
   onStreamingAssistantTextChange: (v: string | ((prev: string) => string)) => void;
@@ -49,6 +47,8 @@ interface Props {
   onActivityMode: (mode: "trace" | "logs") => void;
   onSessionCreated: (sessionId: string) => void;
   t: (zh: string, en: string) => string;
+  // Current mcpDetail from parent (used for initial load, session lookup)
+  mcpDetail: McpSessionDetail | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,24 +64,25 @@ export default function Chat(props: Props) {
   const [input, setInput] = useState("");
   const [citationOpen, setCitationOpen] = useState(false);
   const [activeCitation, setActiveCitation] = useState<AnswerCitation | null>(null);
+  const [status, setStatus] = useState("");
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Refs to always read latest values from streaming callback (prevent stale closure)
-  const mcpDetailRef = useRef(mcpDetail);
-  const runningMcpSearchesRef = useRef(runningMcpSearches);
-  mcpDetailRef.current = mcpDetail;
-  runningMcpSearchesRef.current = runningMcpSearches;
+  // -----------------------------------------------------------------------
+  // Auto-scroll to bottom (matching SAG)
+  // -----------------------------------------------------------------------
 
-  // Auto-scroll to bottom
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ block: "end" });
   }, [mcpDetail?.messages.length, pendingUserMessage, streamingAssistantText, isMcpRunning, runningMcpSearches.length]);
 
-  // Ensure MCP session exists
+  // -----------------------------------------------------------------------
+  // Auto-load existing session on project change
+  // -----------------------------------------------------------------------
+
   useEffect(() => {
     if (!projectId) return;
-    if (mcpDetail) return; // already loaded
+    if (mcpDetail) return;
     (async () => {
       try {
         const data = await api.listMcpSessions(projectId);
@@ -95,209 +96,30 @@ export default function Chat(props: Props) {
   }, [projectId]);
 
   // -----------------------------------------------------------------------
-  // Send message
+  // Helpers — match SAG's functional updater pattern exactly
   // -----------------------------------------------------------------------
 
-  const handleSend = async () => {
-    const content = input.trim();
-    if (!content || !projectId || isMcpRunning) return;
-
-    let sessionId = mcpDetail?.session.id;
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    props.onIsMcpRunningChange(true);
-    props.onPendingUserMessageChange(content);
-    props.onStreamingAssistantTextChange("");
-    props.onRunningMcpSearchesChange([]);
-    props.onActivityMode("trace");
-    props.onProcessStepsChange([]);
-    setInput("");
-
-    try {
-      // Create session if needed
-      if (!sessionId) {
-        const created = await api.createMcpSession({ sourceIds: [projectId] });
-        sessionId = created.session.id;
-        const detail = await api.getMcpSession(sessionId);
-        props.onMcpDetailChange(detail);
-        props.onSessionCreated(sessionId);
-      }
-
-      await api.streamMcpMessage(
-        sessionId,
-        content,
-        (event) => handleStreamEvent(event),
-        controller.signal,
-      );
-
-      await syncModelLogsAfter();
-    } catch (e: any) {
-      if (e.name === "AbortError") {
-        message.info(t("已停止生成", "Generation stopped"));
-        if (sessionId) {
-          const detail = await api.getMcpSession(sessionId);
-          props.onMcpDetailChange(detail);
-        }
-        addProcessStep({
-          id: makeStepId("stopped"),
-          title: t("已停止", "Stopped"),
-          detail: t("你手动停止了本轮对话。", "You manually stopped this conversation turn."),
-          status: "done" as const,
-        });
-        return;
-      }
-      message.error(e.message);
-      addProcessStep({
-        id: makeStepId("error"),
-        title: t("对话失败", "Conversation failed"),
-        detail: e.message,
-        status: "failed" as const,
-      });
-    } finally {
-      if (abortRef.current === controller) abortRef.current = null;
-      props.onPendingUserMessageChange("");
-      props.onStreamingAssistantTextChange("");
-      props.onIsMcpRunningChange(false);
-    }
-  };
-
-  // -----------------------------------------------------------------------
-  // SSE event handler (matches SAG's handleMcpStreamEvent)
-  // -----------------------------------------------------------------------
-
-  function handleStreamEvent(event: McpStreamEvent) {
-    props.onLogUpdate([event]); // accumulate for ActivityPanel
-
-    if (event.type === "stage") return;
-
-    if (event.type === "message") {
-      const detail = mcpDetailRef.current;
-      if (!detail) return;
-      if (event.message.role === "user") props.onPendingUserMessageChange("");
-      if (event.message.role === "assistant") props.onStreamingAssistantTextChange("");
-      const exists = detail.messages.some((m) => m.id === event.message.id);
-      if (!exists) {
-        props.onMcpDetailChange({
-          ...detail,
-          messages: [...detail.messages, event.message],
-        });
-      }
-      return;
-    }
-
-    if (event.type === "assistant_delta") {
-      props.onStreamingAssistantTextChange((prev) => prev + event.delta);
-      return;
-    }
-
-    if (event.type === "tool_start") {
-      if (event.toolName === "sag_search") {
-        const query = typeof event.arguments.query === "string" && event.arguments.query.trim()
-          ? event.arguments.query.trim()
-          : t("未提供查询参数", "No query argument provided");
-        const mode = typeof event.arguments.searchMode === "string" ? event.arguments.searchMode : undefined;
-        props.onRunningMcpSearchesChange([
-          ...runningMcpSearchesRef.current,
-          { id: makeStepId("search"), toolName: event.toolName, query, searchMode: mode },
-        ]);
-        addProcessStep({
-          id: makeStepId("mcp-search"),
-          title: t("MCP 搜索语句", "MCP search query"),
-          detail: query,
-          status: "running",
-        });
-      }
-      return;
-    }
-
-    if (event.type === "search_progress") {
-      upsertProcessStep({
-        id: `search-${event.event.key}`,
-        title: event.event.title,
-        detail: event.event.detail,
-        status: event.event.status === "running" ? "running" : event.event.status === "failed" ? "failed" : "done",
-        payload: event.event.payload,
-        durationMs: event.event.durationMs ?? null,
-      });
-      return;
-    }
-
-    if (event.type === "tool_end") {
-      const detail = mcpDetailRef.current;
-      if (detail) {
-        const exists = detail.toolCalls.some((tc) => tc.id === event.toolCall.id);
-        if (!exists) {
-          props.onMcpDetailChange({
-            ...detail,
-            toolCalls: [...detail.toolCalls, event.toolCall],
-          });
-        }
-      }
-      if (event.toolCall.toolName === "sag_search") {
-        finishRunningSteps();
-        if (event.toolCall.status === "FAILED") {
-          props.onProcessStepsChange([{
-            id: makeStepId("sag-failed"),
-            title: t("SAG 检索失败", "SAG retrieval failed"),
-            detail: event.toolCall.error ?? t("工具返回失败", "Tool returned a failure"),
-            status: "failed",
-          }]);
-        }
-      }
-      return;
-    }
-
-    if (event.type === "done") {
-      if (event.detail) props.onMcpDetailChange(event.detail);
-      finishRunningSteps();
-      message.success(t("对话完成", "Conversation complete"));
-      return;
-    }
-
-    if (event.type === "error") {
-      addProcessStep({
-        id: makeStepId("mcp-error"),
-        title: t("执行失败", "Execution failed"),
-        detail: event.message,
-        status: "failed",
-      });
-      message.error(event.message);
-    }
+  function appendMessageToDetail(message: McpMessageRecord) {
+    props.onMcpDetailChange((current) => {
+      if (!current || current.session.id !== message.sessionId) return current;
+      if (current.messages.some((item) => item.id === message.id)) return current;
+      return {
+        ...current,
+        messages: [...current.messages, message],
+      };
+    });
   }
 
-  // -----------------------------------------------------------------------
-  // Session management
-  // -----------------------------------------------------------------------
-
-  const handleStop = () => {
-    if (!isMcpRunning) return;
-    abortRef.current?.abort();
-  };
-
-  const handleClearSession = async () => {
-    if (!mcpDetail) return;
-    try {
-      const detail = await api.clearMcpSession(mcpDetail.session.id);
-      props.onMcpDetailChange(detail);
-      props.onProcessStepsChange([]);
-      message.success(t("对话记录已清空", "Conversation history cleared"));
-    } catch (e: any) { message.error(e.message); }
-  };
-
-  const handleDeleteSession = async () => {
-    if (!mcpDetail) return;
-    try {
-      await api.deleteMcpSession(mcpDetail.session.id);
-      props.onMcpDetailChange(null);
-      props.onProcessStepsChange([]);
-      message.success(t("对话已删除", "Conversation deleted"));
-    } catch (e: any) { message.error(e.message); }
-  };
-
-  // -----------------------------------------------------------------------
-  // Helpers
-  // -----------------------------------------------------------------------
+  function appendToolCallToDetail(toolCall: McpToolCallRecord) {
+    props.onMcpDetailChange((current) => {
+      if (!current || current.session.id !== toolCall.sessionId) return current;
+      if (current.toolCalls.some((item) => item.id === toolCall.id)) return current;
+      return {
+        ...current,
+        toolCalls: [...current.toolCalls, toolCall],
+      };
+    });
+  }
 
   function addProcessStep(step: ProcessStep) {
     props.onProcessStepsChange([...processSteps, step]);
@@ -320,15 +142,192 @@ export default function Chat(props: Props) {
     );
   }
 
-  async function syncModelLogsAfter() {
+  // -----------------------------------------------------------------------
+  // SSE event handler — EXACT SAG pattern
+  // -----------------------------------------------------------------------
+
+  function handleMcpStreamEvent(event: McpStreamEvent) {
+    if (event.type === "stage") {
+      return;
+    }
+    if (event.type === "message") {
+      appendMessageToDetail(event.message);
+      if (event.message.role === "user") {
+        props.onPendingUserMessageChange("");
+      }
+      if (event.message.role === "assistant") {
+        props.onStreamingAssistantTextChange("");
+      }
+      return;
+    }
+    if (event.type === "assistant_delta") {
+      props.onStreamingAssistantTextChange((current) => current + event.delta);
+      return;
+    }
+    if (event.type === "tool_start") {
+      if (event.toolName === "sag_search") {
+        const query = typeof event.arguments.query === "string" && event.arguments.query.trim()
+          ? event.arguments.query.trim()
+          : t("未提供查询参数", "No query argument provided");
+        const mode = typeof event.arguments.searchMode === "string" ? event.arguments.searchMode : undefined;
+        props.onRunningMcpSearchesChange([
+          ...runningMcpSearches,
+          { id: makeStepId("search"), toolName: event.toolName, query, searchMode: mode },
+        ]);
+        addProcessStep({
+          id: "mcp-sag-search-running",
+          title: t("SAG 检索执行中", "SAG retrieval is running"),
+          detail: t("MCP 工具已发起 sag_search，正在实时接收 SAG 内部检索阶段。", "The MCP tool has started sag_search and is receiving SAG internal retrieval stages in real time."),
+          status: "running",
+          payload: event.arguments as any,
+        });
+      }
+      return;
+    }
+    if (event.type === "search_progress") {
+      upsertProcessStep({
+        id: `search-${event.event.key}`,
+        title: event.event.title,
+        detail: event.event.detail,
+        status: event.event.status === "running" ? "running" : event.event.status === "failed" ? "failed" : "done",
+        payload: event.event.payload,
+        durationMs: event.event.durationMs ?? null,
+      });
+      return;
+    }
+    if (event.type === "tool_end") {
+      appendToolCallToDetail(event.toolCall);
+      if (event.toolCall.toolName === "sag_search") {
+        if (event.toolCall.status === "FAILED") {
+          props.onProcessStepsChange([{
+            id: makeStepId("sag-search-failed"),
+            title: t("SAG 检索失败", "SAG retrieval failed"),
+            detail: event.toolCall.error ?? t("工具返回失败", "Tool returned a failure"),
+            status: "failed",
+          }]);
+          return;
+        }
+        // Pass raw tool result to parent for trace parsing
+        props.onLogUpdate([event.toolCall]);
+      }
+      return;
+    }
+    if (event.type === "done") {
+      if (event.detail) {
+        props.onMcpDetailChange(event.detail);
+      }
+      finishRunningSteps();
+      setStatus(t("对话完成", "Conversation complete"));
+      return;
+    }
+    if (event.type === "error") {
+      addProcessStep({
+        id: makeStepId("mcp-error"),
+        title: t("执行失败", "Execution failed"),
+        detail: event.message,
+        status: "failed",
+      });
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Send message — EXACT SAG pattern
+  // -----------------------------------------------------------------------
+
+  async function sendMcpMessage() {
+    const content = input.trim();
+    if (!content || !projectId) return;
+    let sessionId = mcpDetail?.session.id;
+    const abortController = new AbortController();
+    abortRef.current = abortController;
+    props.onIsMcpRunningChange(true);
+    props.onPendingUserMessageChange(content);
+    props.onStreamingAssistantTextChange("");
+    props.onRunningMcpSearchesChange([]);
+    props.onActivityMode("trace");
+    props.onProcessStepsChange([]);
+    setInput("");
+    setStatus("");
+    try {
+      if (!sessionId) {
+        const response = await api.createMcpSession({ sourceIds: [projectId] });
+        sessionId = response.session.id;
+        const detail = await api.getMcpSession(sessionId);
+        props.onMcpDetailChange(detail);
+        props.onSessionCreated(sessionId);
+      }
+      await api.streamMcpMessage(sessionId, content, handleMcpStreamEvent, abortController.signal);
+      await syncModelLogs();
+    } catch (err: any) {
+      await syncModelLogs();
+      if (err.name === "AbortError") {
+        setStatus(t("已停止生成", "Generation stopped"));
+        if (sessionId) {
+          const detail = await api.getMcpSession(sessionId);
+          props.onMcpDetailChange(detail);
+        }
+        addProcessStep({
+          id: makeStepId("stopped"),
+          title: t("已停止", "Stopped"),
+          detail: t("你手动停止了本轮对话。", "You manually stopped this conversation turn."),
+          status: "done",
+        });
+        return;
+      }
+      setStatus(err.message);
+      addProcessStep({
+        id: makeStepId("error"),
+        title: t("对话失败", "Conversation failed"),
+        detail: err.message,
+        status: "failed",
+      });
+    } finally {
+      if (abortRef.current === abortController) {
+        abortRef.current = null;
+      }
+      props.onPendingUserMessageChange("");
+      props.onStreamingAssistantTextChange("");
+      props.onIsMcpRunningChange(false);
+    }
+  }
+
+  async function syncModelLogs() {
     try {
       const res = await api.listModelCallLogs(0);
       props.onLogUpdate(res.logs ?? []);
     } catch { /* logs are best-effort */ }
   }
 
+  function stopMcpMessage() {
+    if (!isMcpRunning) return;
+    setStatus(t("正在停止生成...", "Stopping generation..."));
+    abortRef.current?.abort();
+  }
+
   // -----------------------------------------------------------------------
-  // Render
+  // Session management
+  // -----------------------------------------------------------------------
+
+  async function handleClearSession() {
+    if (!mcpDetail) return;
+    try {
+      const detail = await api.clearMcpSession(mcpDetail.session.id);
+      props.onMcpDetailChange(detail);
+      props.onProcessStepsChange([]);
+    } catch (e: any) { message.error(e.message); }
+  }
+
+  async function handleDeleteSession() {
+    if (!mcpDetail) return;
+    try {
+      await api.deleteMcpSession(mcpDetail.session.id);
+      props.onMcpDetailChange(null);
+      props.onProcessStepsChange([]);
+    } catch (e: any) { message.error(e.message); }
+  }
+
+  // -----------------------------------------------------------------------
+  // Render — Ant Design version of SAG's ConversationWorkspace
   // -----------------------------------------------------------------------
 
   if (!project) {
@@ -343,7 +342,7 @@ export default function Chat(props: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 48px)" }}>
-      {/* Header */}
+      {/* Header — matching SAG's session header */}
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "center",
         padding: "8px 24px", borderBottom: "1px solid #f0f0f0", flexWrap: "wrap", gap: 8,
@@ -376,9 +375,10 @@ export default function Chat(props: Props) {
         </Space>
       </div>
 
-      {/* Messages */}
+      {/* Messages area — matching SAG's scroll area */}
       <div style={{ flex: 1, overflow: "auto", padding: "16px 24px" }}>
         <div style={{ maxWidth: 720, margin: "0 auto" }}>
+          {/* Empty state */}
           {messages.length === 0 && !isMcpRunning && (
             <Empty
               description={t("还没有对话", "No conversation yet")}
@@ -386,6 +386,7 @@ export default function Chat(props: Props) {
             />
           )}
 
+          {/* Completed messages */}
           {messages.map((msg) => {
             const citations = getMessageCitations(msg as any);
             return (
@@ -410,6 +411,7 @@ export default function Chat(props: Props) {
                     citations={citations}
                     onOpenCitation={(cit) => { setActiveCitation(cit); setCitationOpen(true); }}
                   />
+                  {/* Citation strip */}
                   {msg.role === "assistant" && citations.length > 0 && (
                     <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid rgba(0,0,0,0.06)" }}>
                       <Text type="secondary" style={{ fontSize: 11 }}>{t("引用原文", "Source citations")}</Text>
@@ -433,8 +435,8 @@ export default function Chat(props: Props) {
             );
           })}
 
-          {/* Pending user message */}
-          {pendingUserMessage && (
+          {/* Pending user message (optimistic render) */}
+          {pendingUserMessage ? (
             <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
               <div style={{
                 maxWidth: "86%", padding: "10px 14px", borderRadius: 8,
@@ -444,10 +446,10 @@ export default function Chat(props: Props) {
                 <MarkdownMessage content={pendingUserMessage} />
               </div>
             </div>
-          )}
+          ) : null}
 
-          {/* Running MCP searches */}
-          {isMcpRunning && (
+          {/* Running MCP searches indicator */}
+          {isMcpRunning ? (
             <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 16 }}>
               <div style={{
                 maxWidth: "86%", padding: "10px 14px", borderRadius: 8,
@@ -456,9 +458,9 @@ export default function Chat(props: Props) {
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                   <LoadingOutlined />
                   <Text strong>{t("正在使用 MCP 检索", "Using MCP retrieval")}</Text>
-                  {runningMcpSearches.length > 0 && (
+                  {runningMcpSearches.length > 0 ? (
                     <Tag>{t(`${runningMcpSearches.length} 次搜索`, `${runningMcpSearches.length} search(es)`)}</Tag>
-                  )}
+                  ) : null}
                 </div>
                 {runningMcpSearches.length === 0 ? (
                   <Text type="secondary" style={{ fontSize: 12 }}>
@@ -473,17 +475,17 @@ export default function Chat(props: Props) {
                       {t(`搜索 ${i + 1}：`, `Search ${i + 1}: `)}
                     </Text>
                     <Text style={{ fontSize: 13 }}>{s.query}</Text>
-                    {s.searchMode && (
+                    {s.searchMode ? (
                       <div style={{ fontSize: 11, color: "#999" }}>{t("模式", "Mode")}: {s.searchMode}</div>
-                    )}
+                    ) : null}
                   </div>
                 ))}
               </div>
             </div>
-          )}
+          ) : null}
 
-          {/* Streaming assistant text */}
-          {streamingAssistantText && (
+          {/* Streaming assistant text (real-time deltas) */}
+          {streamingAssistantText ? (
             <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 16 }}>
               <div style={{
                 maxWidth: "86%", padding: "10px 14px", borderRadius: 8,
@@ -493,13 +495,20 @@ export default function Chat(props: Props) {
                 <MarkdownMessage content={streamingAssistantText} />
               </div>
             </div>
-          )}
+          ) : null}
+
+          {/* Status message */}
+          {status ? (
+            <div style={{ textAlign: "center", marginBottom: 16 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>{status}</Text>
+            </div>
+          ) : null}
 
           <div ref={scrollRef} />
         </div>
       </div>
 
-      {/* Input */}
+      {/* Input bar — matching SAG's input area */}
       <div style={{ padding: "8px 24px", borderTop: "1px solid #f0f0f0" }}>
         <div style={{ maxWidth: 720, margin: "0 auto" }}>
           <Space.Compact style={{ width: "100%" }}>
@@ -509,7 +518,7 @@ export default function Chat(props: Props) {
               onPressEnter={(e) => {
                 if (!e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
-                  if (!isMcpRunning && input.trim()) handleSend();
+                  if (!isMcpRunning && input.trim()) sendMcpMessage();
                 }
               }}
               placeholder={t("基于当前项目资料提问...", "Ask about the current project documents...")}
@@ -519,7 +528,7 @@ export default function Chat(props: Props) {
               type={isMcpRunning ? "default" : "primary"}
               danger={isMcpRunning}
               icon={isMcpRunning ? <StopOutlined /> : <SendOutlined />}
-              onClick={isMcpRunning ? handleStop : handleSend}
+              onClick={isMcpRunning ? stopMcpMessage : sendMcpMessage}
               disabled={!isMcpRunning && !input.trim()}
             >
               {isMcpRunning ? t("停止", "Stop") : t("发送", "Send")}

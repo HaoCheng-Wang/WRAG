@@ -16,6 +16,7 @@ md_storage/
 # Frontend
 frontend/node_modules/
 frontend/dist/
+*.tsbuildinfo
 
 # IDE
 .idea/

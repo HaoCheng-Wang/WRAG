@@ -45,7 +45,10 @@ class SagClient:
         content: str,
         file_name: str,
     ) -> dict:
-        """Call SAG POST /api/documents/upload/jobs (async ingestion)."""
+        """Call SAG POST /api/documents/upload/jobs (async ingestion).
+
+        Returns the unwrapped job record (not {job: {...}}).
+        """
         resp = await self.client.post(
             f"{self.base_url}/api/documents/upload/jobs",
             json={
@@ -56,15 +59,20 @@ class SagClient:
             },
         )
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        return data.get("job", data)
 
     async def get_upload_job(self, job_id: str) -> dict:
-        """Call SAG GET /api/documents/upload/jobs/{job_id}."""
+        """Call SAG GET /api/documents/upload/jobs/{job_id}.
+
+        Returns the unwrapped job record (not {job: {...}}).
+        """
         resp = await self.client.get(
             f"{self.base_url}/api/documents/upload/jobs/{job_id}"
         )
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        return data.get("job", data)
 
     # ------------------------------------------------------------------
     # Transparent proxy

@@ -20,6 +20,16 @@ interface Props {
 
 type Stage = "idle" | "converting" | "converted" | "saving_md" | "md_saved" | "ingesting" | "ingested" | "done" | "error";
 
+interface JobProgress {
+  job_id: string;
+  status: string;
+  stage: string;
+  progress: number;
+  message: string;
+  chunkCount: number;
+  eventCount: number;
+}
+
 export default function UploadDialog({ open, projectId, onClose, onSuccess, t }: Props) {
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [saveMarkdown, setSaveMarkdown] = useState(true);
@@ -29,6 +39,7 @@ export default function UploadDialog({ open, projectId, onClose, onSuccess, t }:
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<any>(null);
+  const [jobProgress, setJobProgress] = useState<JobProgress | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -39,6 +50,7 @@ export default function UploadDialog({ open, projectId, onClose, onSuccess, t }:
       setProgress(0);
       setError(null);
       setResult(null);
+      setJobProgress(null);
       abortRef.current = null;
     }
   }, [open]);
@@ -74,9 +86,14 @@ export default function UploadDialog({ open, projectId, onClose, onSuccess, t }:
           s === "md_saved" ? "md_saved" :
           s === "ingesting" ? "ingesting" :
           s === "ingested" ? "ingested" :
-          s === "done" ? "done" : "error";
+          s === "done" ? "done" : s === "job_progress" ? "ingesting" : "error";
         setStage(mapped as Stage);
-        setProgress(stageMap[mapped as Stage]?.pct ?? 0);
+        if (s === "job_progress") {
+          setJobProgress(data as JobProgress);
+          setProgress(Math.max(80, Math.min(95, 80 + Math.round((data as JobProgress).progress * 0.15))));
+        } else {
+          setProgress(stageMap[mapped as Stage]?.pct ?? 0);
+        }
         if (s === "error") setError(data?.message ?? "Unknown error");
       }, controller.signal);
       if (controller.signal.aborted) return;
@@ -151,7 +168,16 @@ export default function UploadDialog({ open, projectId, onClose, onSuccess, t }:
       {uploading && (
         <div style={{ marginTop: 16 }}>
           <Progress percent={progress} status={stage === "error" ? "exception" : "active"} />
-          <Text type="secondary">{stageMap[stage]?.label}</Text>
+          <Text type="secondary">
+            {stageMap[stage]?.label}
+            {jobProgress && ` — ${jobProgress.message}`}
+          </Text>
+          {jobProgress && (
+            <div style={{ fontSize: 12, color: "#888", marginTop: 4 }}>
+              {jobProgress.chunkCount > 0 && <span>{t("分块", "Chunks")}: {jobProgress.chunkCount}  </span>}
+              {jobProgress.eventCount > 0 && <span>{t("事件", "Events")}: {jobProgress.eventCount}</span>}
+            </div>
+          )}
         </div>
       )}
 

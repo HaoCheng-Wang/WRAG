@@ -4,9 +4,10 @@
  *  - Left panel: stats, upload jobs panel (progress bars), document list
  *  - Right panel: Overview / Chunks / Events / Entities / Search tabs
  *  - Archive/restore toggle, document rename, search mode toggle
+ *  - Inline file upload (no modal) with jobs in queue panel
  */
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Statistic, Button, Tabs, Tag, Table, message, Input, Card,
   Popconfirm, Space, Empty, Descriptions, Row, Col, Spin, Typography, Progress, Switch,
@@ -21,7 +22,6 @@ import type {
   SearchResult, UploadJobRecord, SourceRecord, SearchMode, EmbeddingPreview,
 } from "../types";
 import { formatDate, formatBytes, shortId } from "../lib/markdown";
-import UploadDialog from "../components/UploadDialog";
 import DetailDrawer from "../components/DetailDrawer";
 
 const { Text, Paragraph } = Typography;
@@ -45,7 +45,6 @@ export default function Documents(props: Props) {
   const [stats, setStats] = useState<ProjectStatsRecord | null>(null);
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
-  const [uploadOpen, setUploadOpen] = useState(false);
   const [resultView, setResultView] = useState<ResultView>("overview");
   const [chunks, setChunks] = useState<ChunkRecord[]>([]);
   const [events, setEvents] = useState<EventRecord[]>([]);
@@ -62,6 +61,9 @@ export default function Documents(props: Props) {
   const [uploadQueueExpanded, setUploadQueueExpanded] = useState(false);
   const [resultFilter, setResultFilter] = useState("");
   const [resultPage, setResultPage] = useState(1);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadJobsRef = useRef(uploadJobs);
+  uploadJobsRef.current = uploadJobs;
 
   // Auto-expand upload queue when jobs are active
   const hasActiveUploads = useMemo(
@@ -165,6 +167,83 @@ export default function Documents(props: Props) {
     } catch (e: any) { message.error(e.message); }
   };
 
+  // -----------------------------------------------------------------------
+  // Inline file upload (matches SAG's pattern: select file → show in queue)
+  // -----------------------------------------------------------------------
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !projectId) return;
+    // Reset input so same file can be re-selected
+    e.target.value = "";
+
+    // Create optimistic job entry immediately
+    const now = new Date().toISOString();
+    const tempJob: UploadJobRecord = {
+      id: `upload-${Date.now()}`,
+      sourceId: projectId,
+      fileName: file.name,
+      title: file.name.replace(/\.[^.]+$/, "") || file.name,
+      status: "QUEUED",
+      stage: "QUEUED",
+      message: t("准备上传...", "Preparing upload..."),
+      progress: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+    props.onUploadJobsChange([tempJob, ...uploadJobs]);
+    // Update ref immediately so SSE callbacks can find this job
+    uploadJobsRef.current = [tempJob, ...uploadJobsRef.current];
+
+    const updateJob = (patch: Partial<UploadJobRecord>) => {
+      // Update our ref immediately (don't wait for React re-render)
+      const next = uploadJobsRef.current.map((j) => j.id === tempJob.id ? { ...j, ...patch, updatedAt: new Date().toISOString() } : j);
+      uploadJobsRef.current = next;
+      props.onUploadJobsChange(next);
+    };
+
+    const controller = new AbortController();
+
+    try {
+      updateJob({ status: "RUNNING", stage: "READING" as any, message: t("转换格式...", "Converting format..."), progress: 5 });
+      const result = await api.uploadFile(projectId, file, null, true, (stage, data) => {
+        if (controller.signal.aborted) return;
+        if (stage === "converting" || stage === "converted" || stage === "saving_md" || stage === "md_saved") {
+          updateJob({ progress: stage === "converting" ? 10 : stage === "converted" ? 40 : stage === "saving_md" ? 50 : 65, message: data?.stage ?? stage });
+        } else if (stage === "ingesting") {
+          updateJob({ progress: 70, message: t("提交到知识库...", "Submitting to KB...") });
+        } else if (stage === "job_progress") {
+          updateJob({
+            status: data.status === "FAILED" ? "FAILED" : "RUNNING",
+            stage: (data.stage ?? data.status ?? "RUNNING") as any,
+            message: data.message ?? "",
+            progress: Math.round(data.progress ?? 0),
+            chunkCount: data.chunkCount,
+            eventCount: data.eventCount,
+            documentId: data.documentId,
+          });
+        }
+      }, controller.signal);
+
+      updateJob({
+        status: "COMPLETED",
+        stage: "COMPLETED",
+        message: t("处理完成", "Processing complete"),
+        progress: 100,
+        documentId: result.document_id,
+      });
+
+      // Refresh document list
+      setTimeout(() => {
+        loadData();
+        props.onProjectsChange();
+      }, 500);
+    } catch (err: any) {
+      if (err.name === "AbortError") return;
+      updateJob({ status: "FAILED", stage: "FAILED", message: err.message, error: err.message, progress: 100 });
+    }
+  };
+
   // Filter helpers
   const filterKeyword = resultFilter.trim().toLowerCase();
   const filteredChunks = filterKeyword ? chunks.filter((c) => (c.heading ?? "").toLowerCase().includes(filterKeyword)) : chunks;
@@ -253,7 +332,15 @@ export default function Documents(props: Props) {
 
         {/* Actions */}
         <Space style={{ marginBottom: 10 }}>
-          <Button type="primary" size="small" icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            style={{ display: "none" }}
+            accept=".txt,.md,.pdf,.docx,.pptx,.xlsx,.csv,.html,.epub,.json,.xml,.zip,.ipynb,.jpg,.jpeg,.png,.gif,.bmp,.tiff,.webp,.mp3,.wav,.ogg,.flac,.wma,.m4a"
+            onChange={handleFileSelect}
+          />
+          <Button type="primary" size="small" icon={<UploadOutlined />}
+            onClick={() => fileInputRef.current?.click()}>
             {t("添加文档", "Add document")}
           </Button>
           <Button size="small" icon={<ReloadOutlined />} onClick={loadData} />
@@ -521,14 +608,6 @@ export default function Documents(props: Props) {
           </>
         )}
       </div>
-
-      <UploadDialog
-        open={uploadOpen}
-        projectId={projectId}
-        onClose={() => setUploadOpen(false)}
-        onSuccess={() => { loadData(); props.onProjectsChange(); }}
-        t={t}
-      />
 
       <DetailDrawer
         open={detailOpen}
